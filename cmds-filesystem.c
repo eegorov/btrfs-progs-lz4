@@ -846,6 +846,8 @@ static int parse_compress_type(char *s)
 		return BTRFS_COMPRESS_LZO;
 	else if (strcmp(optarg, "zstd") == 0)
 		return BTRFS_COMPRESS_ZSTD;
+	else if (strcmp(optarg, "lz4") == 0)
+		return BTRFS_COMPRESS_LZ4;
 	else {
 		error("unknown compression type %s", s);
 		exit(1);

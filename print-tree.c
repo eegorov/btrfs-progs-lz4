@@ -326,6 +326,9 @@ static void compress_type_to_str(u8 compress_type, char *ret)
 	case BTRFS_COMPRESS_ZSTD:
 		strcpy(ret, "zstd");
 		break;
+	case BTRFS_COMPRESS_LZ4:
+		strcpy(ret, "lz4");
+		break;
 	default:
 		sprintf(ret, "UNKNOWN.%d", compress_type);
 	}
