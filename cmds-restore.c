@@ -166,6 +166,9 @@ static int decompress(struct btrfs_root *root, char *inbuf, char *outbuf,
 	case BTRFS_COMPRESS_LZO:
 		return decompress_lzo(root, (unsigned char *)inbuf, outbuf,
 					compress_len, decompress_len);
+//	case BTRFS_COMPRESS_LZ4:
+//		return lz4_decompress(root, (unsigned char *)inbuf, outbuf,
+//					compress_len, decompress_len);
 	default:
 		break;
 	}
