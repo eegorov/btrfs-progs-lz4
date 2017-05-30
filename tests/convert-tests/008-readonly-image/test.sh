@@ -1,8 +1,8 @@
 #!/bin/bash
 # Check if the converted ext2 image is readonly
 
-source $TOP/tests/common
-source $TOP/tests/common.convert
+source "$TOP/tests/common"
+source "$TOP/tests/common.convert"
 
 setup_root_helper
 prepare_test_dev 512M
@@ -16,7 +16,7 @@ convert_test_do_convert
 run_check_mount_test_dev
 
 # It's expected to fail
-$SUDO_HELPER dd if=/dev/zero of=$TEST_MNT/ext2_save/image bs=1M count=1 \
+$SUDO_HELPER dd if=/dev/zero of="$TEST_MNT/ext2_save/image" bs=1M count=1 \
 	&> /dev/null
 if [ $? -ne 1 ]; then
 	echo "after convert ext2_save/image is not read-only"

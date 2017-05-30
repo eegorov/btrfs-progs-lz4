@@ -126,7 +126,7 @@ static int decompress_lzo(struct btrfs_root *root, unsigned char *inbuf,
 
 		inbuf += LZO_LEN;
 		tot_in += LZO_LEN;
-		new_len = lzo1x_worst_compress(root->sectorsize);
+		new_len = lzo1x_worst_compress(root->fs_info->sectorsize);
 		ret = lzo1x_decompress_safe((const unsigned char *)inbuf, in_len,
 					    (unsigned char *)outbuf,
 					    (void *)&new_len, NULL);
@@ -143,8 +143,8 @@ static int decompress_lzo(struct btrfs_root *root, unsigned char *inbuf,
 		 * If the 4 byte header does not fit to the rest of the page we
 		 * have to move to the next one, unless we read some garbage
 		 */
-		mod_page = tot_in % root->sectorsize;
-		rem_page = root->sectorsize - mod_page;
+		mod_page = tot_in % root->fs_info->sectorsize;
+		rem_page = root->fs_info->sectorsize - mod_page;
 		if (rem_page < LZO_LEN) {
 			inbuf += rem_page;
 			tot_in += rem_page;
@@ -184,6 +184,7 @@ static int next_leaf(struct btrfs_root *root, struct btrfs_path *path)
 	int offset = 1;
 	struct extent_buffer *c;
 	struct extent_buffer *next = NULL;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 
 again:
 	for (; level < BTRFS_MAX_LEVEL; level++) {
@@ -213,7 +214,7 @@ again:
 		if (path->reada)
 			reada_for_search(root, path, level, slot, 0);
 
-		next = read_node_slot(root, c, slot);
+		next = read_node_slot(fs_info, c, slot);
 		if (extent_buffer_uptodate(next))
 			break;
 		offset++;
@@ -229,7 +230,7 @@ again:
 			break;
 		if (path->reada)
 			reada_for_search(root, path, level, 0, 0);
-		next = read_node_slot(root, next, 0);
+		next = read_node_slot(fs_info, next, 0);
 		if (!extent_buffer_uptodate(next))
 			goto again;
 	}
@@ -1258,8 +1259,8 @@ static struct btrfs_root *open_fs(const char *dev, u64 root_location,
 		if (!root_location)
 			root_location = btrfs_super_root(fs_info->super_copy);
 		generation = btrfs_super_generation(fs_info->super_copy);
-		root->node = read_tree_block(root, root_location,
-					     root->nodesize, generation);
+		root->node = read_tree_block(fs_info, root_location,
+					     fs_info->nodesize, generation);
 		if (!extent_buffer_uptodate(root->node)) {
 			fprintf(stderr, "Error opening tree root\n");
 			close_ctree(root);
@@ -1505,7 +1506,8 @@ int cmd_restore(int argc, char **argv)
 
 	if (fs_location != 0) {
 		free_extent_buffer(root->node);
-		root->node = read_tree_block(root, fs_location, root->nodesize, 0);
+		root->node = read_tree_block(root->fs_info, fs_location,
+				root->fs_info->nodesize, 0);
 		if (!extent_buffer_uptodate(root->node)) {
 			fprintf(stderr, "Failed to read fs location\n");
 			ret = 1;
