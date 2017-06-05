@@ -92,10 +92,10 @@ CHECKER_FLAGS := -include $(check_defs) -D__CHECKER__ \
 objects = ctree.o disk-io.o kernel-lib/radix-tree.o extent-tree.o print-tree.o \
 	  root-tree.o dir-item.o file-item.o inode-item.o inode-map.o \
 	  extent-cache.o extent_io.o volumes.o utils.o repair.o \
-	  qgroup.o raid56.o free-space-cache.o kernel-lib/list_sort.o props.o \
+	  qgroup.o free-space-cache.o kernel-lib/list_sort.o props.o \
 	  kernel-shared/ulist.o qgroup-verify.o backref.o string-table.o task-utils.o \
 	  inode.o file.o find-root.o free-space-tree.o help.o send-dump.o \
-	  fsfeatures.o
+	  fsfeatures.o kernel-lib/tables.o kernel-lib/raid56.o
 cmds_objects = cmds-subvolume.o cmds-filesystem.o cmds-device.o cmds-scrub.o \
 	       cmds-inspect.o cmds-balance.o cmds-send.o cmds-receive.o \
 	       cmds-quota.o cmds-qgroup.o cmds-replace.o cmds-check.o \
@@ -108,8 +108,8 @@ libbtrfs_objects = send-stream.o send-utils.o kernel-lib/rbtree.o btrfs-list.o \
 		   uuid-tree.o utils-lib.o rbtree-utils.o
 libbtrfs_headers = send-stream.h send-utils.h send.h kernel-lib/rbtree.h btrfs-list.h \
 	       kernel-lib/crc32c.h kernel-lib/list.h kerncompat.h \
-	       kernel-lib/radix-tree.h kernel-lib/sizes.h extent-cache.h \
-	       extent_io.h ioctl.h ctree.h btrfsck.h version.h
+	       kernel-lib/radix-tree.h kernel-lib/sizes.h kernel-lib/raid56.h \
+	       extent-cache.h extent_io.h ioctl.h ctree.h btrfsck.h version.h
 convert_objects = convert/main.o convert/common.o convert/source-fs.o \
 		  convert/source-ext2.o
 mkfs_objects = mkfs/main.o mkfs/common.o
@@ -314,6 +314,14 @@ version.h: version.sh version.h.in configure.ac
 	@echo "    [SH]     $@"
 	$(Q)bash ./config.status --silent $@
 
+mktables: kernel-lib/mktables.c
+	@echo "    [CC]     $@"
+	$(Q)$(CC) $(CFLAGS) $< -o $@
+
+kernel-lib/tables.c: mktables
+	@echo "    [TABLE]  $@"
+	$(Q)./mktables > $@ || ($(RM) -f $@ && exit 1)
+
 libbtrfs: $(libs_shared) $(lib_links)
 
 $(libs_shared): $(libbtrfs_objects) $(lib_links) send.h
@@ -503,11 +511,12 @@ clean: $(CLEANDIRS)
 	$(Q)$(RM) -f -- $(progs) *.o *.o.d \
 		kernel-lib/*.o kernel-lib/*.o.d \
 		kernel-shared/*.o kernel-shared/*.o.d \
+		kernel-lib/tables.c \
 		image/*.o image/*.o.d \
 		convert/*.o convert/*.o.d \
 		mkfs/*.o mkfs/*.o.d \
 	      dir-test ioctl-test quick-test library-test library-test-static \
-	      btrfs.static mkfs.btrfs.static fssum \
+              mktables btrfs.static mkfs.btrfs.static fssum \
 	      $(check_defs) \
 	      $(libs) $(lib_links) \
 	      $(progs_static) $(progs_extra)
