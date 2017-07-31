@@ -69,13 +69,13 @@ static int remove_sb_from_cache(struct btrfs_root *root,
 	u64 *logical;
 	int stripe_len;
 	int i, nr, ret;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct extent_io_tree *free_space_cache;
 
-	free_space_cache = &root->fs_info->free_space_cache;
+	free_space_cache = &fs_info->free_space_cache;
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = btrfs_rmap_block(&root->fs_info->mapping_tree,
-				       cache->key.objectid, bytenr, 0,
+		ret = btrfs_rmap_block(fs_info, cache->key.objectid, bytenr, 0,
 				       &logical, &nr, &stripe_len);
 		BUG_ON(ret);
 		while (nr--) {
@@ -1872,7 +1872,7 @@ static void set_avail_alloc_bits(struct btrfs_fs_info *fs_info, u64 flags)
 }
 
 static int do_chunk_alloc(struct btrfs_trans_handle *trans,
-			  struct btrfs_root *extent_root, u64 alloc_bytes,
+			  struct btrfs_fs_info *fs_info, u64 alloc_bytes,
 			  u64 flags)
 {
 	struct btrfs_space_info *space_info;
@@ -1881,10 +1881,9 @@ static int do_chunk_alloc(struct btrfs_trans_handle *trans,
 	u64 num_bytes;
 	int ret;
 
-	space_info = __find_space_info(extent_root->fs_info, flags);
+	space_info = __find_space_info(fs_info, flags);
 	if (!space_info) {
-		ret = update_space_info(extent_root->fs_info, flags,
-					0, 0, &space_info);
+		ret = update_space_info(fs_info, flags, 0, 0, &space_info);
 		BUG_ON(ret);
 	}
 	BUG_ON(!space_info);
@@ -1900,14 +1899,14 @@ static int do_chunk_alloc(struct btrfs_trans_handle *trans,
 	/*
 	 * Avoid allocating given chunk type
 	 */
-	if (extent_root->fs_info->avoid_meta_chunk_alloc &&
+	if (fs_info->avoid_meta_chunk_alloc &&
 	    (flags & BTRFS_BLOCK_GROUP_METADATA))
 		return 0;
-	if (extent_root->fs_info->avoid_sys_chunk_alloc &&
+	if (fs_info->avoid_sys_chunk_alloc &&
 	    (flags & BTRFS_BLOCK_GROUP_SYSTEM))
 		return 0;
 
-	ret = btrfs_alloc_chunk(trans, extent_root, &start, &num_bytes,
+	ret = btrfs_alloc_chunk(trans, fs_info, &start, &num_bytes,
 	                        space_info->flags);
 	if (ret == -ENOSPC) {
 		space_info->full = 1;
@@ -1916,7 +1915,7 @@ static int do_chunk_alloc(struct btrfs_trans_handle *trans,
 
 	BUG_ON(ret);
 
-	ret = btrfs_make_block_group(trans, extent_root, 0, space_info->flags,
+	ret = btrfs_make_block_group(trans, fs_info, 0, space_info->flags,
 		     BTRFS_FIRST_CHUNK_TREE_OBJECTID, start, num_bytes);
 	BUG_ON(ret);
 	return 0;
@@ -2119,7 +2118,7 @@ static int pin_down_bytes(struct btrfs_trans_handle *trans,
 	if (is_data)
 		goto pinit;
 
-	buf = btrfs_find_tree_block(root, bytenr, num_bytes);
+	buf = btrfs_find_tree_block(root->fs_info, bytenr, num_bytes);
 	if (!buf)
 		goto pinit;
 
@@ -2612,8 +2611,9 @@ check_failed:
 				goto no_bg_cache;
 			bg_offset = ins->objectid - bg_cache->key.objectid;
 
-			search_start = round_up(bg_offset + num_bytes,
-						BTRFS_STRIPE_LEN) + bg_offset;
+			search_start = round_up(
+				bg_offset + num_bytes, BTRFS_STRIPE_LEN) +
+				bg_cache->key.objectid;
 			goto new_group;
 		}
 no_bg_cache:
@@ -2676,12 +2676,12 @@ int btrfs_reserve_extent(struct btrfs_trans_handle *trans,
 
 	if (root->ref_cows) {
 		if (!(data & BTRFS_BLOCK_GROUP_METADATA)) {
-			ret = do_chunk_alloc(trans, root->fs_info->extent_root,
+			ret = do_chunk_alloc(trans, info,
 					     num_bytes,
 					     BTRFS_BLOCK_GROUP_METADATA);
 			BUG_ON(ret);
 		}
-		ret = do_chunk_alloc(trans, root->fs_info->extent_root,
+		ret = do_chunk_alloc(trans, info,
 				     num_bytes + SZ_2M, data);
 		BUG_ON(ret);
 	}
@@ -2692,7 +2692,7 @@ int btrfs_reserve_extent(struct btrfs_trans_handle *trans,
 			       trans->alloc_exclude_start,
 			       trans->alloc_exclude_nr, data);
 	BUG_ON(ret);
-	clear_extent_dirty(&root->fs_info->free_space_cache,
+	clear_extent_dirty(&info->free_space_cache,
 			   ins->objectid, ins->objectid + ins->offset - 1);
 	return ret;
 }
@@ -3181,7 +3181,7 @@ static void account_super_bytes(struct btrfs_fs_info *fs_info,
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = btrfs_rmap_block(&fs_info->mapping_tree,
+		ret = btrfs_rmap_block(fs_info,
 				       cache->key.objectid, bytenr,
 				       0, &logical, &nr, &stripe_len);
 		if (ret)
@@ -3286,7 +3286,7 @@ int btrfs_read_block_groups(struct btrfs_root *root)
 			bit = BLOCK_GROUP_METADATA;
 		}
 		set_avail_alloc_bits(info, cache->flags);
-		if (btrfs_chunk_readonly(root, cache->key.objectid))
+		if (btrfs_chunk_readonly(info, cache->key.objectid))
 			cache->ro = 1;
 
 		account_super_bytes(info, cache);
@@ -3352,17 +3352,16 @@ btrfs_add_block_group(struct btrfs_fs_info *fs_info, u64 bytes_used, u64 type,
 }
 
 int btrfs_make_block_group(struct btrfs_trans_handle *trans,
-			   struct btrfs_root *root, u64 bytes_used,
+			   struct btrfs_fs_info *fs_info, u64 bytes_used,
 			   u64 type, u64 chunk_objectid, u64 chunk_offset,
 			   u64 size)
 {
 	int ret;
-	struct btrfs_root *extent_root;
+	struct btrfs_root *extent_root = fs_info->extent_root;
 	struct btrfs_block_group_cache *cache;
 
-	cache = btrfs_add_block_group(root->fs_info, bytes_used, type,
+	cache = btrfs_add_block_group(fs_info, bytes_used, type,
 				      chunk_objectid, chunk_offset, size);
-	extent_root = root->fs_info->extent_root;
 	ret = btrfs_insert_item(trans, extent_root, &cache->key, &cache->item,
 				sizeof(cache->item));
 	BUG_ON(ret);
@@ -3383,7 +3382,7 @@ int btrfs_make_block_group(struct btrfs_trans_handle *trans,
  * before doing any block allocation.
  */
 int btrfs_make_block_groups(struct btrfs_trans_handle *trans,
-			    struct btrfs_root *root)
+			    struct btrfs_fs_info *fs_info)
 {
 	u64 total_bytes;
 	u64 cur_start;
@@ -3395,15 +3394,14 @@ int btrfs_make_block_groups(struct btrfs_trans_handle *trans,
 	u64 chunk_objectid;
 	int ret;
 	int bit;
-	struct btrfs_root *extent_root;
+	struct btrfs_root *extent_root = fs_info->extent_root;
 	struct btrfs_block_group_cache *cache;
 	struct extent_io_tree *block_group_cache;
 
-	extent_root = root->fs_info->extent_root;
-	block_group_cache = &root->fs_info->block_group_cache;
+	block_group_cache = &fs_info->block_group_cache;
 	chunk_objectid = BTRFS_FIRST_CHUNK_TREE_OBJECTID;
-	total_bytes = btrfs_super_total_bytes(root->fs_info->super_copy);
-	group_align = 64 * root->fs_info->sectorsize;
+	total_bytes = btrfs_super_total_bytes(fs_info->super_copy);
+	group_align = 64 * fs_info->sectorsize;
 
 	cur_start = 0;
 	while (cur_start < total_bytes) {
@@ -3446,10 +3444,10 @@ int btrfs_make_block_groups(struct btrfs_trans_handle *trans,
 
 		cache->flags = group_type;
 
-		ret = update_space_info(root->fs_info, group_type, group_size,
+		ret = update_space_info(fs_info, group_type, group_size,
 					0, &cache->space_info);
 		BUG_ON(ret);
-		set_avail_alloc_bits(extent_root->fs_info, group_type);
+		set_avail_alloc_bits(fs_info, group_type);
 
 		set_extent_bits(block_group_cache, cur_start,
 				cur_start + group_size - 1,
@@ -3461,7 +3459,7 @@ int btrfs_make_block_groups(struct btrfs_trans_handle *trans,
 	/* then insert all the items */
 	cur_start = 0;
 	while(cur_start < total_bytes) {
-		cache = btrfs_lookup_block_group(root->fs_info, cur_start);
+		cache = btrfs_lookup_block_group(fs_info, cur_start);
 		BUG_ON(!cache);
 
 		ret = btrfs_insert_item(trans, extent_root, &cache->key, &cache->item,
@@ -4180,7 +4178,7 @@ int exclude_super_stripes(struct btrfs_root *root,
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = btrfs_rmap_block(&root->fs_info->mapping_tree,
+		ret = btrfs_rmap_block(root->fs_info,
 				       cache->key.objectid, bytenr,
 				       0, &logical, &nr, &stripe_len);
 		if (ret)

@@ -876,6 +876,7 @@ static int read_data_extent(struct metadump_struct *md,
 			    struct async_work *async)
 {
 	struct btrfs_root *root = md->root;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	u64 bytes_left = async->size;
 	u64 logical = async->start;
 	u64 offset = 0;
@@ -884,14 +885,13 @@ static int read_data_extent(struct metadump_struct *md,
 	int cur_mirror;
 	int ret;
 
-	num_copies = btrfs_num_copies(&root->fs_info->mapping_tree, logical,
-				      bytes_left);
+	num_copies = btrfs_num_copies(root->fs_info, logical, bytes_left);
 
 	/* Try our best to read data, just like read_tree_block() */
 	for (cur_mirror = 0; cur_mirror < num_copies; cur_mirror++) {
 		while (bytes_left) {
 			read_len = bytes_left;
-			ret = read_extent_data(root,
+			ret = read_extent_data(fs_info,
 					(char *)(async->buffer + offset),
 					logical, &read_len, cur_mirror);
 			if (ret < 0)
@@ -1029,7 +1029,7 @@ static int add_extent(u64 start, u64 size, struct metadump_struct *md,
 			return ret;
 		md->pending_start = start;
 	}
-	readahead_tree_block(md->root, start, size, 0);
+	readahead_tree_block(md->root->fs_info, start, size, 0);
 	md->pending_size += size;
 	md->data = data;
 	return 0;
@@ -1720,14 +1720,15 @@ static void *restore_worker(void *data)
 		}
 		async = list_entry(mdres->list.next, struct async_work, list);
 		list_del_init(&async->list);
-		pthread_mutex_unlock(&mdres->mutex);
 
 		if (mdres->compress_method == COMPRESS_ZLIB) {
 			size = compress_size; 
+			pthread_mutex_unlock(&mdres->mutex);
 			ret = uncompress(buffer, (unsigned long *)&size,
 					 async->buffer, async->bufsize);
+			pthread_mutex_lock(&mdres->mutex);
 			if (ret != Z_OK) {
-				error("decompressiion failed with %d", ret);
+				error("decompression failed with %d", ret);
 				err = -EIO;
 			}
 			outbuf = buffer;
@@ -1803,7 +1804,6 @@ error:
 		if (!mdres->multi_devices && async->start == BTRFS_SUPER_INFO_OFFSET)
 			write_backup_supers(outfd, outbuf);
 
-		pthread_mutex_lock(&mdres->mutex);
 		if (err && !mdres->error)
 			mdres->error = err;
 		mdres->num_items--;
@@ -1904,7 +1904,7 @@ static int fill_mdres_info(struct mdrestore_struct *mdres,
 		ret = uncompress(buffer, (unsigned long *)&size,
 				 async->buffer, async->bufsize);
 		if (ret != Z_OK) {
-			error("decompressiion failed with %d", ret);
+			error("decompression failed with %d", ret);
 			free(buffer);
 			return -EIO;
 		}
@@ -1933,7 +1933,9 @@ static int add_cluster(struct meta_cluster *cluster,
 	u32 i, nritems;
 	int ret;
 
+	pthread_mutex_lock(&mdres->mutex);
 	mdres->compress_method = header->compress;
+	pthread_mutex_unlock(&mdres->mutex);
 
 	bytenr = le64_to_cpu(header->bytenr) + BLOCK_SIZE;
 	nritems = le32_to_cpu(header->nritems);
@@ -2176,7 +2178,7 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 				continue;
 			}
 			error(
-	"unknown state after reading cluster at %llu, probably crrupted data",
+	"unknown state after reading cluster at %llu, probably corrupted data",
 					cluster_bytenr);
 			ret = -EIO;
 			break;
@@ -2225,7 +2227,7 @@ static int search_for_chunk_blocks(struct mdrestore_struct *mdres,
 						 (unsigned long *)&size, tmp,
 						 bufsize);
 				if (ret != Z_OK) {
-					error("decompressiion failed with %d",
+					error("decompression failed with %d",
 							ret);
 					ret = -EIO;
 					break;
@@ -2345,7 +2347,7 @@ static int build_chunk_tree(struct mdrestore_struct *mdres,
 		ret = uncompress(tmp, (unsigned long *)&size,
 				 buffer, le32_to_cpu(item->size));
 		if (ret != Z_OK) {
-			error("decompressiion failed with %d", ret);
+			error("decompression failed with %d", ret);
 			free(buffer);
 			free(tmp);
 			return -EIO;

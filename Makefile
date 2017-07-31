@@ -17,6 +17,7 @@
 #                  abort   - call abort() on first error (dumps core)
 #                  all     - shortcut for all of the above
 #                  asan    - enable address sanitizer compiler feature
+#                  tsan    - enable thread sanitizer compiler feature
 #                  ubsan   - undefined behaviour sanitizer compiler feature
 #                  bcheck  - extended build checks
 #   W=123          build with warnings (default: off)
@@ -157,6 +158,11 @@ ifneq (,$(findstring asan,$(D)))
   DEBUG_CFLAGS_INTERNAL += -fsanitize=address
 endif
 
+ifneq (,$(findstring tsan,$(D)))
+  DEBUG_CFLAGS_INTERNAL += -fsanitize=thread -fPIE
+  LD_FLAGS += -fsanitize=thread -ltsan -pie
+endif
+
 ifneq (,$(findstring ubsan,$(D)))
   DEBUG_CFLAGS_INTERNAL += -fsanitize=undefined
 endif
@@ -272,11 +278,12 @@ test-convert: btrfs btrfs-convert
 	$(Q)bash tests/convert-tests.sh
 
 test-check: test-fsck
-test-fsck: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs
+test-fsck: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune
 	@echo "    [TEST]   fsck-tests.sh"
 	$(Q)bash tests/fsck-tests.sh
 
-test-misc: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune fssum
+test-misc: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune fssum \
+		btrfs-zero-log btrfs-find-root btrfs-select-super
 	@echo "    [TEST]   misc-tests.sh"
 	$(Q)bash tests/misc-tests.sh
 

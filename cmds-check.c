@@ -1967,6 +1967,7 @@ out:
 static void reada_walk_down(struct btrfs_root *root,
 			    struct extent_buffer *node, int slot)
 {
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	u64 bytenr;
 	u64 ptr_gen;
 	u32 nritems;
@@ -1979,11 +1980,11 @@ static void reada_walk_down(struct btrfs_root *root,
 		return;
 
 	nritems = btrfs_header_nritems(node);
-	blocksize = root->fs_info->nodesize;
+	blocksize = fs_info->nodesize;
 	for (i = slot; i < nritems; i++) {
 		bytenr = btrfs_node_blockptr(node, i);
 		ptr_gen = btrfs_node_ptr_generation(node, i);
-		readahead_tree_block(root, bytenr, blocksize, ptr_gen);
+		readahead_tree_block(fs_info, bytenr, blocksize, ptr_gen);
 	}
 }
 
@@ -2104,6 +2105,7 @@ static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 	enum btrfs_tree_block_status status;
 	u64 bytenr;
 	u64 ptr_gen;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct extent_buffer *next;
 	struct extent_buffer *cur;
 	u32 blocksize;
@@ -2155,7 +2157,7 @@ static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 		}
 		bytenr = btrfs_node_blockptr(cur, path->slots[*level]);
 		ptr_gen = btrfs_node_ptr_generation(cur, path->slots[*level]);
-		blocksize = root->fs_info->nodesize;
+		blocksize = fs_info->nodesize;
 
 		if (bytenr == nrefs->bytenr[*level - 1]) {
 			refs = nrefs->refs[*level - 1];
@@ -2179,7 +2181,7 @@ static int walk_down_tree(struct btrfs_root *root, struct btrfs_path *path,
 			}
 		}
 
-		next = btrfs_find_tree_block(root, bytenr, blocksize);
+		next = btrfs_find_tree_block(fs_info, bytenr, blocksize);
 		if (!next || !btrfs_buffer_uptodate(next, ptr_gen)) {
 			free_extent_buffer(next);
 			reada_walk_down(root, cur, path->slots[*level]);
@@ -2242,6 +2244,7 @@ static int walk_down_tree_v2(struct btrfs_root *root, struct btrfs_path *path,
 	enum btrfs_tree_block_status status;
 	u64 bytenr;
 	u64 ptr_gen;
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct extent_buffer *next;
 	struct extent_buffer *cur;
 	u32 blocksize;
@@ -2284,7 +2287,7 @@ static int walk_down_tree_v2(struct btrfs_root *root, struct btrfs_path *path,
 		}
 		bytenr = btrfs_node_blockptr(cur, path->slots[*level]);
 		ptr_gen = btrfs_node_ptr_generation(cur, path->slots[*level]);
-		blocksize = root->fs_info->nodesize;
+		blocksize = fs_info->nodesize;
 
 		ret = update_nodes_refs(root, bytenr, nrefs, *level - 1);
 		if (ret)
@@ -2294,11 +2297,11 @@ static int walk_down_tree_v2(struct btrfs_root *root, struct btrfs_path *path,
 			continue;
 		}
 
-		next = btrfs_find_tree_block(root, bytenr, blocksize);
+		next = btrfs_find_tree_block(fs_info, bytenr, blocksize);
 		if (!next || !btrfs_buffer_uptodate(next, ptr_gen)) {
 			free_extent_buffer(next);
 			reada_walk_down(root, cur, path->slots[*level]);
-			next = read_tree_block(root->fs_info, bytenr, blocksize,
+			next = read_tree_block(fs_info, bytenr, blocksize,
 					       ptr_gen);
 			if (!extent_buffer_uptodate(next)) {
 				struct btrfs_key node_key;
@@ -2306,10 +2309,10 @@ static int walk_down_tree_v2(struct btrfs_root *root, struct btrfs_path *path,
 				btrfs_node_key_to_cpu(path->nodes[*level],
 						      &node_key,
 						      path->slots[*level]);
-				btrfs_add_corrupt_extent_record(root->fs_info,
+				btrfs_add_corrupt_extent_record(fs_info,
 						&node_key,
 						path->nodes[*level]->start,
-						root->fs_info->nodesize,
+						fs_info->nodesize,
 						*level);
 				ret = -EIO;
 				break;
@@ -4782,6 +4785,7 @@ static int check_file_extent(struct btrfs_root *root, struct btrfs_key *fkey,
 				extent_num_bytes, item_inline_len);
 			err |= FILE_EXTENT_ERROR;
 		}
+		*end += extent_num_bytes;
 		*size += extent_num_bytes;
 		return err;
 	}
@@ -4841,11 +4845,7 @@ static int check_file_extent(struct btrfs_root *root, struct btrfs_key *fkey,
 	}
 
 	/* Check EXTENT_DATA hole */
-	if (no_holes && is_hole) {
-		err |= FILE_EXTENT_ERROR;
-		error("root %llu EXTENT_DATA[%llu %llu] shouldn't be hole",
-		      root->objectid, fkey->objectid, fkey->offset);
-	} else if (!no_holes && *end != fkey->offset) {
+	if (!no_holes && *end != fkey->offset) {
 		err |= FILE_EXTENT_ERROR;
 		error("root %llu EXTENT_DATA[%llu %llu] interrupt",
 		      root->objectid, fkey->objectid, fkey->offset);
@@ -6626,7 +6626,7 @@ static int process_chunk_item(struct cache_tree *chunk_cache,
 	 * wrong onwer(3) out of chunk tree, to pass both chunk tree check
 	 * and owner<->key_type check.
 	 */
-	ret = btrfs_check_chunk_valid(global_info->tree_root, eb, chunk, slot,
+	ret = btrfs_check_chunk_valid(global_info, eb, chunk, slot,
 				      key->offset);
 	if (ret < 0) {
 		error("chunk(%llu, %llu) is not valid, ignore it",
@@ -6932,7 +6932,7 @@ static int check_cache_range(struct btrfs_root *root,
 
 	for (i = 0; i < BTRFS_SUPER_MIRROR_MAX; i++) {
 		bytenr = btrfs_sb_offset(i);
-		ret = btrfs_rmap_block(&root->fs_info->mapping_tree,
+		ret = btrfs_rmap_block(root->fs_info,
 				       cache->key.objectid, bytenr, 0,
 				       &logical, &nr, &stripe_len);
 		if (ret)
@@ -7169,8 +7169,9 @@ static int check_extent_csums(struct btrfs_root *root, u64 bytenr,
 			u64 num_bytes, unsigned long leaf_offset,
 			struct extent_buffer *eb) {
 
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	u64 offset = 0;
-	u16 csum_size = btrfs_super_csum_size(root->fs_info->super_copy);
+	u16 csum_size = btrfs_super_csum_size(fs_info->super_copy);
 	char *data;
 	unsigned long csum_offset;
 	u32 csum;
@@ -7182,7 +7183,7 @@ static int check_extent_csums(struct btrfs_root *root, u64 bytenr,
 	int mirror;
 	int num_copies;
 
-	if (num_bytes % root->fs_info->sectorsize)
+	if (num_bytes % fs_info->sectorsize)
 		return -EINVAL;
 
 	data = malloc(num_bytes);
@@ -7194,7 +7195,7 @@ static int check_extent_csums(struct btrfs_root *root, u64 bytenr,
 again:
 		read_len = num_bytes - offset;
 		/* read as much space once a time */
-		ret = read_extent_data(root, data + offset,
+		ret = read_extent_data(fs_info, data + offset,
 				bytenr + offset, &read_len, mirror);
 		if (ret)
 			goto out;
@@ -7205,11 +7206,11 @@ again:
 			tmp = offset + data_checked;
 
 			csum = btrfs_csum_data((char *)data + tmp,
-					       csum, root->fs_info->sectorsize);
+					       csum, fs_info->sectorsize);
 			btrfs_csum_final(csum, (u8 *)&csum);
 
 			csum_offset = leaf_offset +
-				 tmp / root->fs_info->sectorsize * csum_size;
+				 tmp / fs_info->sectorsize * csum_size;
 			read_extent_buffer(eb, (char *)&csum_expected,
 					   csum_offset, csum_size);
 			/* try another mirror */
@@ -7217,15 +7218,14 @@ again:
 				fprintf(stderr, "mirror %d bytenr %llu csum %u expected csum %u\n",
 						mirror, bytenr + tmp,
 						csum, csum_expected);
-				num_copies = btrfs_num_copies(
-						&root->fs_info->mapping_tree,
+				num_copies = btrfs_num_copies(root->fs_info,
 						bytenr, num_bytes);
 				if (mirror < num_copies - 1) {
 					mirror += 1;
 					goto again;
 				}
 			}
-			data_checked += root->fs_info->sectorsize;
+			data_checked += fs_info->sectorsize;
 		}
 		offset += read_len;
 	}
@@ -7611,6 +7611,7 @@ static int run_next_block(struct btrfs_root *root,
 			  struct device_extent_tree *dev_extent_cache,
 			  struct root_item_record *ri)
 {
+	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct extent_buffer *buf;
 	struct extent_record *rec = NULL;
 	u64 bytenr;
@@ -7640,7 +7641,7 @@ static int run_next_block(struct btrfs_root *root,
 				continue;
 
 			/* fixme, get the parent transid */
-			readahead_tree_block(root, bits[i].start,
+			readahead_tree_block(fs_info, bits[i].start,
 					     bits[i].size, 0);
 		}
 	}
@@ -10926,7 +10927,7 @@ static int check_dev_extent_item(struct btrfs_fs_info *fs_info,
 
 	l = path.nodes[0];
 	chunk = btrfs_item_ptr(l, path.slots[0], struct btrfs_chunk);
-	ret = btrfs_check_chunk_valid(chunk_root, l, chunk, path.slots[0],
+	ret = btrfs_check_chunk_valid(fs_info, l, chunk, path.slots[0],
 				      chunk_key.offset);
 	if (ret < 0)
 		goto out;
@@ -11184,7 +11185,7 @@ static int check_chunk_item(struct btrfs_fs_info *fs_info,
 	chunk = btrfs_item_ptr(eb, slot, struct btrfs_chunk);
 	length = btrfs_chunk_length(eb, chunk);
 	chunk_end = chunk_key.offset + length;
-	ret = btrfs_check_chunk_valid(extent_root, eb, chunk, slot,
+	ret = btrfs_check_chunk_valid(fs_info, eb, chunk, slot,
 				      chunk_key.offset);
 	if (ret < 0) {
 		error("chunk[%llu %llu) is invalid", chunk_key.offset,
@@ -12084,13 +12085,14 @@ static int populate_csum(struct btrfs_trans_handle *trans,
 			 struct btrfs_root *csum_root, char *buf, u64 start,
 			 u64 len)
 {
+	struct btrfs_fs_info *fs_info = csum_root->fs_info;
 	u64 offset = 0;
 	u64 sectorsize;
 	int ret = 0;
 
 	while (offset < len) {
-		sectorsize = csum_root->fs_info->sectorsize;
-		ret = read_extent_data(csum_root, buf, start + offset,
+		sectorsize = fs_info->sectorsize;
+		ret = read_extent_data(fs_info, buf, start + offset,
 				       &sectorsize, 0);
 		if (ret)
 			break;
