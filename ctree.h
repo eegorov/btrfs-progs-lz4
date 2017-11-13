@@ -19,6 +19,8 @@
 #ifndef __BTRFS_CTREE_H__
 #define __BTRFS_CTREE_H__
 
+#include <stdbool.h>
+
 #if BTRFS_FLAT_INCLUDES
 #include "list.h"
 #include "kerncompat.h"
@@ -137,6 +139,8 @@ struct btrfs_free_space_ctl;
  * [ 1 BTRFS_DEV_ITEM_KEY device_id ]
  */
 #define BTRFS_DEV_ITEMS_OBJECTID 1ULL
+
+#define BTRFS_EMPTY_SUBVOL_DIR_OBJECTID 2ULL
 
 /*
  * the max metadata block size.  This limit is somewhat artificial,
@@ -482,14 +486,7 @@ struct btrfs_super_block {
 #define BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL	(1ULL << 1)
 #define BTRFS_FEATURE_INCOMPAT_MIXED_GROUPS	(1ULL << 2)
 #define BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO	(1ULL << 3)
-
-/*
- * some patches floated around with a second compression method
- * lets save that incompat here for when they do get in
- * Note we don't actually support it, we're just reserving the
- * number
- */
-#define BTRFS_FEATURE_INCOMPAT_COMPRESS_LZ4   (1ULL << 4)
+#define BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD	(1ULL << 4)
 
 /*
  * older kernels tried to do bigger metadata blocks, but the
@@ -500,6 +497,7 @@ struct btrfs_super_block {
 #define BTRFS_FEATURE_INCOMPAT_RAID56		(1ULL << 7)
 #define BTRFS_FEATURE_INCOMPAT_SKINNY_METADATA	(1ULL << 8)
 #define BTRFS_FEATURE_INCOMPAT_NO_HOLES		(1ULL << 9)
+#define BTRFS_FEATURE_INCOMPAT_COMPRESS_LZ4   (1ULL << 15
 
 #define BTRFS_FEATURE_COMPAT_SUPP		0ULL
 
@@ -515,6 +513,7 @@ struct btrfs_super_block {
 	 BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL |	\
 	 BTRFS_FEATURE_INCOMPAT_COMPRESS_LZO |		\
 	 BTRFS_FEATURE_INCOMPAT_COMPRESS_LZ4 |		\
+	 BTRFS_FEATURE_INCOMPAT_COMPRESS_ZSTD |		\
 	 BTRFS_FEATURE_INCOMPAT_BIG_METADATA |		\
 	 BTRFS_FEATURE_INCOMPAT_EXTENDED_IREF |		\
 	 BTRFS_FEATURE_INCOMPAT_RAID56 |		\
@@ -678,8 +677,9 @@ typedef enum {
 	BTRFS_COMPRESS_LZO   = 2,
 	BTRFS_COMPRESS_LZ4   = 3,
 	BTRFS_COMPRESS_LZ4HC = 4,
-	BTRFS_COMPRESS_TYPES = 4,
-	BTRFS_COMPRESS_LAST  = 5,
+	BTRFS_COMPRESS_ZSTD  = 3,
+	BTRFS_COMPRESS_TYPES = 5,
+	BTRFS_COMPRESS_LAST  = 6,
 } btrfs_compression_type;
 
 /* we don't understand any encryption methods right now */
@@ -1129,8 +1129,8 @@ struct btrfs_fs_info {
 
 	struct btrfs_fs_devices *fs_devices;
 	struct list_head space_info;
-	int system_allocs;
 
+	unsigned int system_allocs:1;
 	unsigned int readonly:1;
 	unsigned int on_restoring:1;
 	unsigned int is_chunk_recover:1;
@@ -1141,6 +1141,8 @@ struct btrfs_fs_info {
 	unsigned int avoid_meta_chunk_alloc:1;
 	unsigned int avoid_sys_chunk_alloc:1;
 	unsigned int finalize_on_close:1;
+
+	int transaction_aborted;
 
 	int (*free_extent_hook)(struct btrfs_trans_handle *trans,
 				struct btrfs_root *root,
@@ -2710,7 +2712,7 @@ int btrfs_insert_file_extent(struct btrfs_trans_handle *trans,
 			     u64 num_bytes);
 int btrfs_insert_inline_extent(struct btrfs_trans_handle *trans,
 				struct btrfs_root *root, u64 objectid,
-				u64 offset, char *buffer, size_t size);
+				u64 offset, const char *buffer, size_t size);
 int btrfs_csum_file_block(struct btrfs_trans_handle *trans,
 			  struct btrfs_root *root, u64 alloc_end,
 			  u64 bytenr, char *data, size_t len);
@@ -2740,7 +2742,7 @@ int btrfs_change_inode_flags(struct btrfs_trans_handle *trans,
 			     struct btrfs_root *root, u64 ino, u64 flags);
 int btrfs_add_link(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		   u64 ino, u64 parent_ino, char *name, int namelen,
-		   u8 type, u64 *index, int add_backref);
+		   u8 type, u64 *index, int add_backref, int ignore_existed);
 int btrfs_unlink(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		 u64 ino, u64 parent_ino, u64 index, const char *name,
 		 int namelen, int add_orphan);
@@ -2749,6 +2751,8 @@ int btrfs_add_orphan_item(struct btrfs_trans_handle *trans,
 			  u64 ino);
 int btrfs_mkdir(struct btrfs_trans_handle *trans, struct btrfs_root *root,
 		char *name, int namelen, u64 parent_ino, u64 *ino, int mode);
+struct btrfs_root *btrfs_mksubvol(struct btrfs_root *root, const char *base,
+				  u64 root_objectid, bool convert);
 
 /* file.c */
 int btrfs_get_extent(struct btrfs_trans_handle *trans,

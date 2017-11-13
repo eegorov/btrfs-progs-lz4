@@ -9,8 +9,9 @@ source "$TOP/tests/common"
 source "$TOP/tests/common.convert"
 
 setup_root_helper
-prepare_test_dev 512M
+prepare_test_dev
 check_prereq btrfs-convert
+check_global_prereq mke2fs
 
 default_mke2fs="mke2fs -t ext4 -b 4096"
 convert_test_preamble '' 'large hole extent test' 16k "$default_mke2fs"
