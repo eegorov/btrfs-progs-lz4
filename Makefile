@@ -303,7 +303,7 @@ test-fsck: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune
 	$(Q)bash tests/fsck-tests.sh
 
 test-misc: btrfs btrfs-image btrfs-corrupt-block mkfs.btrfs btrfstune fssum \
-		btrfs-zero-log btrfs-find-root btrfs-select-super
+		btrfs-zero-log btrfs-find-root btrfs-select-super btrfs-convert
 	@echo "    [TEST]   misc-tests.sh"
 	$(Q)bash tests/misc-tests.sh
 
@@ -311,11 +311,11 @@ test-mkfs: btrfs mkfs.btrfs
 	@echo "    [TEST]   mkfs-tests.sh"
 	$(Q)bash tests/mkfs-tests.sh
 
-test-fuzz: btrfs
+test-fuzz: btrfs btrfs-image
 	@echo "    [TEST]   fuzz-tests.sh"
 	$(Q)bash tests/fuzz-tests.sh
 
-test-cli: btrfs
+test-cli: btrfs mkfs.btrfs
 	@echo "    [TEST]   cli-tests.sh"
 	$(Q)bash tests/cli-tests.sh
 
@@ -329,7 +329,11 @@ test-inst: all
 		$(MAKE) $(MAKEOPTS) DESTDIR=$$tmpdest install && \
 		$(RM) -rf -- $$tmpdest
 
-test: test-fsck test-mkfs test-convert test-misc test-fuzz test-cli
+test: test-fsck test-mkfs test-misc test-cli test-convert test-fuzz
+
+testsuite: btrfs-corrupt-block fssum
+	@echo "Export tests as a package"
+	$(Q)cd tests && ./export-testsuite.sh
 
 #
 # NOTE: For static compiles, you need to have all the required libs

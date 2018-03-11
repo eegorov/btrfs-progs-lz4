@@ -40,7 +40,7 @@ branches:
   - release-test
 
 services:
-  - docker:
+  - docker
 
 env:
   global:
