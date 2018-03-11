@@ -73,9 +73,19 @@ CFLAGS = $(SUBST_CFLAGS) \
 	 -fPIC \
 	 -I$(TOPDIR) \
 	 -I$(TOPDIR)/kernel-lib \
+	 -I$(TOPDIR)/libbtrfsutil \
 	 $(EXTRAWARN_CFLAGS) \
 	 $(DEBUG_CFLAGS_INTERNAL) \
 	 $(EXTRA_CFLAGS)
+
+LIBBTRFSUTIL_CFLAGS = $(SUBST_CFLAGS) \
+		      $(CSTD) \
+		      -D_GNU_SOURCE \
+		      -fPIC \
+		      -fvisibility=hidden \
+		      -I$(TOPDIR)/libbtrfsutil \
+		      $(EXTRAWARN_CFLAGS) \
+		      $(EXTRA_CFLAGS)
 
 LDFLAGS = $(SUBST_LDFLAGS) \
 	  -rdynamic -L$(TOPDIR) \
@@ -121,12 +131,19 @@ libbtrfs_headers = send-stream.h send-utils.h send.h kernel-lib/rbtree.h btrfs-l
 	       kernel-lib/crc32c.h kernel-lib/list.h kerncompat.h \
 	       kernel-lib/radix-tree.h kernel-lib/sizes.h kernel-lib/raid56.h \
 	       extent-cache.h extent_io.h ioctl.h ctree.h btrfsck.h version.h
+libbtrfsutil_major := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MAJOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
+libbtrfsutil_minor := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MINOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
+libbtrfsutil_patch := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_PATCH ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
+libbtrfsutil_version := $(libbtrfsutil_major).$(libbtrfsutil_minor).$(libbtrfsutil_patch)
+libbtrfsutil_objects = libbtrfsutil/errors.o libbtrfsutil/filesystem.o \
+		       libbtrfsutil/subvolume.o libbtrfsutil/qgroup.o \
+		       libbtrfsutil/stubs.o
 convert_objects = convert/main.o convert/common.o convert/source-fs.o \
 		  convert/source-ext2.o convert/source-reiserfs.o
 mkfs_objects = mkfs/main.o mkfs/common.o mkfs/rootdir.o
 image_objects = image/main.o image/sanitize.o
 all_objects = $(objects) $(cmds_objects) $(libbtrfs_objects) $(convert_objects) \
-	      $(mkfs_objects) $(image_objects)
+	      $(mkfs_objects) $(image_objects) $(libbtrfsutil_objects)
 
 udev_rules = 64-btrfs-dm.rules
 
@@ -139,8 +156,10 @@ endif
 
 ifeq ($(BUILD_VERBOSE),1)
   Q =
+  SETUP_PY_Q =
 else
   Q = @
+  SETUP_PY_Q = -q
 endif
 
 ifeq ("$(origin D)", "command line")
@@ -246,11 +265,10 @@ static_convert_objects = $(patsubst %.o, %.static.o, $(convert_objects))
 static_mkfs_objects = $(patsubst %.o, %.static.o, $(mkfs_objects))
 static_image_objects = $(patsubst %.o, %.static.o, $(image_objects))
 
-libs_shared = libbtrfs.so.0.1
-libs_static = libbtrfs.a
+libs_shared = libbtrfs.so.0.1 libbtrfsutil.so.$(libbtrfsutil_version)
+libs_static = libbtrfs.a libbtrfsutil.a
 libs = $(libs_shared) $(libs_static)
-lib_links = libbtrfs.so.0 libbtrfs.so
-headers = $(libbtrfs_headers)
+lib_links = libbtrfs.so.0 libbtrfs.so libbtrfsutil.so.$(libbtrfsutil_major) libbtrfsutil.so
 
 # make C=1 to enable sparse
 ifdef C
@@ -287,7 +305,10 @@ endif
 	$(Q)$(CC) $(STATIC_CFLAGS) -c $< -o $@ $($(subst -,_,$(@:%.static.o=%)-cflags)) \
 		$($(subst -,_,btrfs-$(@:%/$(notdir $@)=%)-cflags))
 
-all: $(progs) libbtrfs $(BUILDDIRS)
+all: $(progs) $(libs) $(lib_links) $(BUILDDIRS)
+ifeq ($(PYTHON_BINDINGS),1)
+all: libbtrfsutil_python
+endif
 $(SUBDIRS): $(BUILDDIRS)
 $(BUILDDIRS):
 	@echo "Making all in $(patsubst build-%,%,$@)"
@@ -335,6 +356,16 @@ testsuite: btrfs-corrupt-block fssum
 	@echo "Export tests as a package"
 	$(Q)cd tests && ./export-testsuite.sh
 
+ifeq ($(PYTHON_BINDINGS),1)
+test-libbtrfsutil: libbtrfsutil_python
+	$(Q)cd libbtrfsutil/python; \
+		LD_LIBRARY_PATH=../.. $(PYTHON) -m unittest discover -v tests
+
+.PHONY: test-libbtrfsutil
+
+test: test-libbtrfsutil
+endif
+
 #
 # NOTE: For static compiles, you need to have all the required libs
 # 	static equivalent available
@@ -355,20 +386,44 @@ kernel-lib/tables.c:
 	@echo "    [TABLE]  $@"
 	$(Q)./mktables > $@ || ($(RM) -f $@ && exit 1)
 
-libbtrfs: $(libs_shared) $(lib_links)
-
-$(libs_shared): $(libbtrfs_objects) $(lib_links) send.h
+libbtrfs.so.0.1: $(libbtrfs_objects)
 	@echo "    [LD]     $@"
-	$(Q)$(CC) $(CFLAGS) $(libbtrfs_objects) $(LDFLAGS) $(LIBBTRFS_LIBS) \
-		-shared -Wl,-soname,libbtrfs.so.0 -o libbtrfs.so.0.1
+	$(Q)$(CC) $(CFLAGS) $^ $(LDFLAGS) $(LIBBTRFS_LIBS) \
+		-shared -Wl,-soname,libbtrfs.so.0 -o $@
 
-$(libs_static): $(libbtrfs_objects)
+libbtrfs.a: $(libbtrfs_objects)
 	@echo "    [AR]     $@"
-	$(Q)$(AR) cr libbtrfs.a $(libbtrfs_objects)
+	$(Q)$(AR) cr $@ $^
 
-$(lib_links):
+libbtrfs.so.0 libbtrfs.so: libbtrfs.so.0.1
 	@echo "    [LN]     $@"
-	$(Q)$(LN_S) -f libbtrfs.so.0.1 $@
+	$(Q)$(LN_S) -f $< $@
+
+libbtrfsutil/%.o: libbtrfsutil/%.c
+	@echo "    [CC]     $@"
+	$(Q)$(CC) $(LIBBTRFSUTIL_CFLAGS) -o $@ -c $< -o $@
+
+libbtrfsutil.so.$(libbtrfsutil_version): $(libbtrfsutil_objects)
+	@echo "    [LD]     $@"
+	$(Q)$(CC) $(LIBBTRFSUTIL_CFLAGS) $(libbtrfsutil_objects) \
+		-shared -Wl,-soname,libbtrfsutil.so.$(libbtrfsutil_major) -o $@
+
+libbtrfsutil.a: $(libbtrfsutil_objects)
+	@echo "    [AR]     $@"
+	$(Q)$(AR) cr $@ $^
+
+libbtrfsutil.so.$(libbtrfsutil_major) libbtrfsutil.so: libbtrfsutil.so.$(libbtrfsutil_version)
+	@echo "    [LN]     $@"
+	$(Q)$(LN_S) -f $< $@
+
+ifeq ($(PYTHON_BINDINGS),1)
+libbtrfsutil_python: libbtrfsutil.so libbtrfsutil/btrfsutil.h
+	@echo "    [PY]     libbtrfsutil"
+	$(Q)cd libbtrfsutil/python; \
+		CFLAGS= LDFLAGS= $(PYTHON) setup.py $(SETUP_PY_Q) build_ext -i build
+
+.PHONY: libbtrfsutil_python
+endif
 
 # keep intermediate files from the below implicit rules around
 .PRECIOUS: $(addsuffix .o,$(progs))
@@ -487,7 +542,7 @@ test-ioctl: ioctl-test ioctl-test-32 ioctl-test-64
 	$(Q)./ioctl-test-32 > ioctl-test-32.log
 	$(Q)./ioctl-test-64 > ioctl-test-64.log
 
-library-test: library-test.c $(libs_shared)
+library-test: library-test.c libbtrfs.so
 	@echo "    [TEST PREP]  $@"$(eval TMPD=$(shell mktemp -d))
 	$(Q)mkdir -p $(TMPD)/include/btrfs && \
 	cp $(libbtrfs_headers) $(TMPD)/include/btrfs && \
@@ -551,7 +606,12 @@ clean: $(CLEANDIRS)
               mktables btrfs.static mkfs.btrfs.static fssum \
 	      $(check_defs) \
 	      $(libs) $(lib_links) \
-	      $(progs_static) $(progs_extra)
+	      $(progs_static) $(progs_extra) \
+	      libbtrfsutil/*.o libbtrfsutil/*.o.d
+ifeq ($(PYTHON_BINDINGS),1)
+	$(Q)cd libbtrfsutil/python; \
+		$(PYTHON) setup.py $(SETUP_PY_Q) clean -a
+endif
 
 clean-doc:
 	@echo "Cleaning Documentation"
@@ -579,11 +639,20 @@ install: $(libs) $(progs_install) $(INSTALLDIRS)
 	$(INSTALL) -m755 -d $(DESTDIR)$(libdir)
 	$(INSTALL) $(libs) $(DESTDIR)$(libdir)
 	cp -a $(lib_links) $(DESTDIR)$(libdir)
-	$(INSTALL) -m755 -d $(DESTDIR)$(incdir)
-	$(INSTALL) -m644 $(headers) $(DESTDIR)$(incdir)
+	$(INSTALL) -m755 -d $(DESTDIR)$(incdir)/btrfs
+	$(INSTALL) -m644 $(libbtrfs_headers) $(DESTDIR)$(incdir)/btrfs
+	$(INSTALL) -m644 libbtrfsutil/btrfsutil.h $(DESTDIR)$(incdir)
 ifneq ($(udevdir),)
 	$(INSTALL) -m755 -d $(DESTDIR)$(udevruledir)
 	$(INSTALL) -m644 $(udev_rules) $(DESTDIR)$(udevruledir)
+endif
+
+ifeq ($(PYTHON_BINDINGS),1)
+install_python: libbtrfsutil_python
+	$(Q)cd libbtrfsutil/python; \
+		$(PYTHON) setup.py install --skip-build $(if $(DESTDIR),--root $(DESTDIR)) --prefix $(prefix)
+
+.PHONY: install_python
 endif
 
 install-static: $(progs_static) $(INSTALLDIRS)
@@ -598,8 +667,9 @@ $(INSTALLDIRS):
 
 uninstall:
 	$(Q)$(MAKE) $(MAKEOPTS) -C Documentation uninstall
-	cd $(DESTDIR)$(incdir); $(RM) -f -- $(headers)
-	$(RMDIR) -p --ignore-fail-on-non-empty -- $(DESTDIR)$(incdir)
+	cd $(DESTDIR)$(incdir)/btrfs; $(RM) -f -- $(libbtrfs_headers)
+	$(RMDIR) -p --ignore-fail-on-non-empty -- $(DESTDIR)$(incdir)/btrfs
+	cd $(DESTDIR)$(incdir); $(RM) -f -- btrfsutil.h
 	cd $(DESTDIR)$(libdir); $(RM) -f -- $(lib_links) $(libs)
 	cd $(DESTDIR)$(bindir); $(RM) -f -- btrfsck fsck.btrfs $(progs_install)
 

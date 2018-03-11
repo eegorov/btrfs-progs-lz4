@@ -1417,6 +1417,7 @@ static int check_file_extent(struct btrfs_root *root, struct btrfs_key *fkey,
 	u64 csum_found;		/* In byte size, sectorsize aligned */
 	u64 search_start;	/* Logical range start we search for csum */
 	u64 search_len;		/* Logical range len we search for csum */
+	u32 max_inline_extent_size = BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info);
 	unsigned int extent_type;
 	unsigned int is_hole;
 	int compressed = 0;
@@ -1438,6 +1439,13 @@ static int check_file_extent(struct btrfs_root *root, struct btrfs_key *fkey,
 			error(
 		"root %llu EXTENT_DATA[%llu %llu] has empty inline extent",
 				root->objectid, fkey->objectid, fkey->offset);
+			err |= FILE_EXTENT_ERROR;
+		}
+		if (extent_num_bytes > max_inline_extent_size) {
+			error(
+"root %llu EXTENT_DATA[%llu %llu] too large inline extent size, have %llu, max: %u",
+				root->objectid, fkey->objectid, fkey->offset,
+				extent_num_bytes, max_inline_extent_size);
 			err |= FILE_EXTENT_ERROR;
 		}
 		if (!compressed && extent_num_bytes != item_inline_len) {
@@ -2631,9 +2639,9 @@ static int check_extent_data_item(struct btrfs_root *root,
 
 	if (!(extent_flags & BTRFS_EXTENT_FLAG_DATA)) {
 		error(
-		    "extent[%llu %llu] backref type mismatch, wanted bit: %llx",
-		    disk_bytenr, disk_num_bytes,
-		    BTRFS_EXTENT_FLAG_DATA);
+"file extent[%llu %llu] root %llu owner %llu backref type mismatch, wanted bit: %llx",
+			fi_key.objectid, fi_key.offset, root->objectid, owner,
+			BTRFS_EXTENT_FLAG_DATA);
 		err |= BACKREF_MISMATCH;
 	}
 
@@ -2689,8 +2697,8 @@ static int check_extent_data_item(struct btrfs_root *root,
 		/* Didn't find inlined data backref, try EXTENT_DATA_REF_KEY */
 		dbref_key.objectid = btrfs_file_extent_disk_bytenr(eb, fi);
 		dbref_key.type = BTRFS_EXTENT_DATA_REF_KEY;
-		dbref_key.offset = hash_extent_data_ref(root->objectid,
-				fi_key.objectid, fi_key.offset - offset);
+		dbref_key.offset = hash_extent_data_ref(owner, fi_key.objectid,
+							fi_key.offset - offset);
 
 		ret = btrfs_search_slot(NULL, root->fs_info->extent_root,
 					&dbref_key, &path, 0, 0);
@@ -2722,8 +2730,9 @@ out:
 		err |= BACKREF_MISSING;
 	btrfs_release_path(&path);
 	if (err & BACKREF_MISSING) {
-		error("data extent[%llu %llu] backref lost",
-		      disk_bytenr, disk_num_bytes);
+		error(
+		"file extent[%llu %llu] root %llu owner %llu backref lost",
+			fi_key.objectid, fi_key.offset, root->objectid, owner);
 	}
 	return err;
 }
