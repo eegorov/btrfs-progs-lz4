@@ -51,6 +51,7 @@ testsuite-id
 /tests/test-console.txt
 /tests/test.img
 /tests/mnt/
+*.restored
 
 aclocal.m4
 autom4te.cache
@@ -81,3 +82,4 @@ stamp-h.in
 stamp-h1
 config/*
 
+*.patch

@@ -1511,9 +1511,17 @@ static int check_file_extent(struct btrfs_root *root, struct btrfs_key *fkey,
 		      csum_found, search_len);
 	} else if (extent_type == BTRFS_FILE_EXTENT_PREALLOC &&
 		   csum_found > 0) {
-		err |= ODD_CSUM_ITEM;
-		error("root %llu EXTENT_DATA[%llu %llu] prealloc shouldn't have csum, but has: %llu",
-		      root->objectid, fkey->objectid, fkey->offset, csum_found);
+		ret = check_prealloc_extent_written(root->fs_info,
+						    disk_bytenr, disk_num_bytes);
+		if (ret < 0)
+			return ret;
+		if (ret == 0) {
+			err |= ODD_CSUM_ITEM;
+			error(
+"root %llu EXTENT_DATA[%llu %llu] prealloc shouldn't have csum, but has: %llu",
+			      root->objectid, fkey->objectid, fkey->offset,
+			      csum_found);
+		}
 	}
 
 	/* Check EXTENT_DATA hole */
@@ -1869,6 +1877,24 @@ out:
 	return ret;
 }
 
+static bool has_orphan_item(struct btrfs_root *root, u64 ino)
+{
+	struct btrfs_path path;
+	struct btrfs_key key;
+	int ret;
+
+	btrfs_init_path(&path);
+	key.objectid = BTRFS_ORPHAN_OBJECTID;
+	key.type = BTRFS_ORPHAN_ITEM_KEY;
+	key.offset = ino;
+
+	ret = btrfs_search_slot(NULL, root, &key, &path, 0, 0);
+	btrfs_release_path(&path);
+	if (ret == 0)
+		return true;
+	return false;
+}
+
 /*
  * Check INODE_ITEM and related ITEMs (the same inode number)
  * 1. check link count
@@ -1898,6 +1924,7 @@ static int check_inode_item(struct btrfs_root *root, struct btrfs_path *path,
 	u64 extent_size = 0;
 	unsigned int dir;
 	unsigned int nodatasum;
+	bool is_orphan = false;
 	int slot;
 	int ret;
 	int err = 0;
@@ -2048,10 +2075,11 @@ out:
 				      root->objectid, inode_id, nlink, refs);
 			}
 		} else if (!nlink) {
-			if (repair)
+			is_orphan = has_orphan_item(root, inode_id);
+			if (!is_orphan && repair)
 				ret = repair_inode_orphan_item_lowmem(root,
 							      path, inode_id);
-			if (!repair || ret) {
+			if (!is_orphan && (!repair || ret)) {
 				err |= ORPHAN_ITEM;
 				error("root %llu INODE[%llu] is orphan item",
 				      root->objectid, inode_id);
