@@ -20,7 +20,7 @@
 #define __BTRFS_CTREE_H__
 
 #include <stdbool.h>
-#include "internal.h"
+#include "common/internal.h"
 
 #if BTRFS_FLAT_INCLUDES
 #include "kernel-lib/list.h"
