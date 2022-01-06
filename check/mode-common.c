@@ -176,6 +176,8 @@ static int check_prealloc_shared_data_ref(u64 parent, u64 disk_bytenr)
  */
 int check_prealloc_extent_written(u64 disk_bytenr, u64 num_bytes)
 {
+	struct btrfs_root *extent_root = btrfs_extent_root(gfs_info,
+							   disk_bytenr);
 	struct btrfs_path path;
 	struct btrfs_key key;
 	int ret;
@@ -189,7 +191,7 @@ int check_prealloc_extent_written(u64 disk_bytenr, u64 num_bytes)
 	key.offset = num_bytes;
 
 	btrfs_init_path(&path);
-	ret = btrfs_search_slot(NULL, gfs_info->extent_root, &key, &path, 0, 0);
+	ret = btrfs_search_slot(NULL, extent_root, &key, &path, 0, 0);
 	if (ret > 0) {
 		fprintf(stderr,
 	"Missing extent item in extent tree for disk_bytenr %llu, num_bytes %llu\n",
@@ -240,7 +242,7 @@ int check_prealloc_extent_written(u64 disk_bytenr, u64 num_bytes)
 	path.slots[0]++;
 	while (true) {
 		if (path.slots[0] >= btrfs_header_nritems(path.nodes[0])) {
-			ret = btrfs_next_leaf(gfs_info->extent_root, &path);
+			ret = btrfs_next_leaf(extent_root, &path);
 			if (ret < 0)
 				goto out;
 			if (ret > 0) {
@@ -287,6 +289,7 @@ out:
  */
 int count_csum_range(u64 start, u64 len, u64 *found)
 {
+	struct btrfs_root *csum_root = btrfs_csum_root(gfs_info, start);
 	struct btrfs_key key;
 	struct btrfs_path path;
 	struct extent_buffer *leaf;
@@ -302,8 +305,7 @@ int count_csum_range(u64 start, u64 len, u64 *found)
 	key.offset = start;
 	key.type = BTRFS_EXTENT_CSUM_KEY;
 
-	ret = btrfs_search_slot(NULL, gfs_info->csum_root,
-				&key, &path, 0, 0);
+	ret = btrfs_search_slot(NULL, csum_root, &key, &path, 0, 0);
 	if (ret < 0)
 		goto out;
 	if (ret > 0 && path.slots[0] > 0) {
@@ -317,7 +319,7 @@ int count_csum_range(u64 start, u64 len, u64 *found)
 	while (len > 0) {
 		leaf = path.nodes[0];
 		if (path.slots[0] >= btrfs_header_nritems(leaf)) {
-			ret = btrfs_next_leaf(gfs_info->csum_root, &path);
+			ret = btrfs_next_leaf(csum_root, &path);
 			if (ret > 0)
 				break;
 			else if (ret < 0)
@@ -599,123 +601,14 @@ void reset_cached_block_groups()
 	}
 }
 
-static int traverse_tree_blocks(struct extent_buffer *eb, int tree_root, int pin)
-{
-	struct extent_buffer *tmp;
-	struct btrfs_root_item *ri;
-	struct btrfs_key key;
-	struct extent_io_tree *tree;
-	u64 bytenr;
-	int level = btrfs_header_level(eb);
-	int nritems;
-	int ret;
-	int i;
-	u64 end = eb->start + eb->len;
-
-	if (pin)
-		tree = &gfs_info->pinned_extents;
-	else
-		tree = gfs_info->excluded_extents;
-	/*
-	 * If we have pinned/excluded this block before, don't do it again.
-	 * This can not only avoid forever loop with broken filesystem
-	 * but also give us some speedups.
-	 */
-	if (test_range_bit(tree, eb->start, end - 1, EXTENT_DIRTY, 0))
-		return 0;
-
-	if (pin)
-		btrfs_pin_extent(gfs_info, eb->start, eb->len);
-	else
-		set_extent_dirty(tree, eb->start, end - 1);
-
-	nritems = btrfs_header_nritems(eb);
-	for (i = 0; i < nritems; i++) {
-		if (level == 0) {
-			bool is_extent_root;
-			btrfs_item_key_to_cpu(eb, &key, i);
-			if (key.type != BTRFS_ROOT_ITEM_KEY)
-				continue;
-			/* Skip the extent root and reloc roots */
-			if (key.objectid == BTRFS_TREE_RELOC_OBJECTID ||
-			    key.objectid == BTRFS_DATA_RELOC_TREE_OBJECTID)
-				continue;
-			is_extent_root =
-				key.objectid == BTRFS_EXTENT_TREE_OBJECTID;
-			/* If pin, skip the extent root */
-			if (pin && is_extent_root)
-				continue;
-			ri = btrfs_item_ptr(eb, i, struct btrfs_root_item);
-			bytenr = btrfs_disk_root_bytenr(eb, ri);
-
-			/*
-			 * If at any point we start needing the real root we
-			 * will have to build a stump root for the root we are
-			 * in, but for now this doesn't actually use the root so
-			 * just pass in extent_root.
-			 */
-			tmp = read_tree_block(gfs_info, bytenr, 0);
-			if (!extent_buffer_uptodate(tmp)) {
-				fprintf(stderr, "Error reading root block\n");
-				return -EIO;
-			}
-			ret = traverse_tree_blocks(tmp, 0, pin);
-			free_extent_buffer(tmp);
-			if (ret)
-				return ret;
-		} else {
-			bytenr = btrfs_node_blockptr(eb, i);
-
-			/* If we aren't the tree root don't read the block */
-			if (level == 1 && !tree_root) {
-				if (pin)
-					btrfs_pin_extent(gfs_info, bytenr,
-							 gfs_info->nodesize);
-				else
-					set_extent_dirty(tree, bytenr,
-							 gfs_info->nodesize);
-				continue;
-			}
-
-			tmp = read_tree_block(gfs_info, bytenr, 0);
-			if (!extent_buffer_uptodate(tmp)) {
-				fprintf(stderr, "Error reading tree block\n");
-				return -EIO;
-			}
-			ret = traverse_tree_blocks(tmp, tree_root, pin);
-			free_extent_buffer(tmp);
-			if (ret)
-				return ret;
-		}
-	}
-
-	return 0;
-}
-
-static int pin_down_tree_blocks(struct extent_buffer *eb, int tree_root)
-{
-	return traverse_tree_blocks(eb, tree_root, 1);
-}
-
 int pin_metadata_blocks(void)
 {
-	int ret;
-
-	ret = pin_down_tree_blocks(gfs_info->chunk_root->node, 0);
-	if (ret)
-		return ret;
-
-	return pin_down_tree_blocks(gfs_info->tree_root->node, 1);
-}
-
-static int exclude_tree_blocks(struct extent_buffer *eb, int tree_root)
-{
-	return traverse_tree_blocks(eb, tree_root, 0);
+	return btrfs_mark_used_tree_blocks(gfs_info,
+					   &gfs_info->pinned_extents);
 }
 
 int exclude_metadata_blocks(void)
 {
-	int ret;
 	struct extent_io_tree *excluded_extents;
 
 	excluded_extents = malloc(sizeof(*excluded_extents));
@@ -724,10 +617,7 @@ int exclude_metadata_blocks(void)
 	extent_io_tree_init(excluded_extents);
 	gfs_info->excluded_extents = excluded_extents;
 
-	ret = exclude_tree_blocks(gfs_info->chunk_root->node, 0);
-	if (ret)
-		return ret;
-	return exclude_tree_blocks(gfs_info->tree_root->node, 1);
+	return btrfs_mark_used_tree_blocks(gfs_info, excluded_extents);
 }
 
 void cleanup_excluded_extents(void)
@@ -1195,7 +1085,7 @@ int recow_extent_buffer(struct btrfs_root *root, struct extent_buffer *eb)
  */
 int get_extent_item_generation(u64 bytenr, u64 *gen_ret)
 {
-	struct btrfs_root *root = gfs_info->extent_root;
+	struct btrfs_root *root = btrfs_extent_root(gfs_info, bytenr);
 	struct btrfs_extent_item *ei;
 	struct btrfs_path path;
 	struct btrfs_key key;
