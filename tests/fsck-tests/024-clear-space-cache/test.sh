@@ -9,7 +9,7 @@ check_prereq mkfs.btrfs
 setup_root_helper
 prepare_test_dev
 
-run_check $SUDO_HELPER "$TOP/mkfs.btrfs" -f "$TEST_DEV"
+run_check_mkfs_test_dev
 run_check_mount_test_dev
 
 # Create files that takes at least 3 data chunks, while
@@ -36,7 +36,7 @@ run_check "$TOP/btrfs" check "$TEST_DEV"
 
 # Manually recheck space cache and super space cache generation
 run_check_stdout "$TOP/btrfs" inspect-internal dump-tree -t root "$TEST_DEV" | \
-	grep -q FREE_SPACE
+	grep -q -w FREE_SPACE
 if [ $? -eq 0 ]; then
 	_fail "clear space cache doesn't clear all space cache"
 fi

@@ -18,15 +18,13 @@
 #define __BTRFS_CONVERT_SOURCE_FS_H__
 
 #include "kerncompat.h"
-#include <linux/kdev_t.h>
-#include <sys/types.h>
 #include <pthread.h>
 #include <sys/types.h>
 
 #define CONV_IMAGE_SUBVOL_OBJECTID BTRFS_FIRST_FREE_OBJECTID
 
 /*
- * Reresents a simple contiguous range.
+ * Represents a simple contiguous range.
  *
  * For multiple or non-contiguous ranges, use extent_cache_tree from
  * extent-cache.c
@@ -56,6 +54,7 @@ struct btrfs_convert_context;
 #define CONVERT_FLAG_XATTR		(1U << 2)
 #define CONVERT_FLAG_COPY_LABEL		(1U << 3)
 #define CONVERT_FLAG_SET_LABEL		(1U << 4)
+#define CONVERT_FLAG_COPY_FSID		(1U << 5)
 
 /* 23.2.5 acl_tag_t values */
 

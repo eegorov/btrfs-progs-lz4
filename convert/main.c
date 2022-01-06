@@ -52,7 +52,7 @@
  *      We can a map used space of old fs
  *
  * 1.2) Calculate data chunk layout - this is the hard part
- *      New data chunks must meet 3 conditions using result fomr 1.1
+ *      New data chunks must meet 3 conditions using result from 1.1
  *      a. Large enough to be a chunk
  *      b. Doesn't intersect reserved ranges
  *      c. Covers all the remaining old fs used space
@@ -66,7 +66,7 @@
  *      c. Doesn't cover any data chunks in 1.1
  *
  * 2)   Create basic btrfs filesystem structure
- *      Initial metadata and sys chunks are inserted in the first availabe
+ *      Initial metadata and sys chunks are inserted in the first available
  *      space found in step 1.3
  *      Then insert all data chunks into the basic btrfs
  *
@@ -90,18 +90,25 @@
 #include <getopt.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <uuid/uuid.h>
 
-#include "ctree.h"
-#include "disk-io.h"
-#include "volumes.h"
-#include "transaction.h"
-#include "utils.h"
-#include "task-utils.h"
-#include "help.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/volumes.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
+#include "common/task-utils.h"
+#include "common/path-utils.h"
+#include "common/help.h"
+#include "common/parse-utils.h"
 #include "mkfs/common.h"
 #include "convert/common.h"
 #include "convert/source-fs.h"
-#include "fsfeatures.h"
+#include "crypto/crc32c.h"
+#include "common/fsfeatures.h"
+#include "common/device-scan.h"
+#include "common/box.h"
+#include "common/open-utils.h"
 
 extern const struct btrfs_convert_operations ext2_convert_ops;
 extern const struct btrfs_convert_operations reiserfs_convert_ops;
@@ -125,7 +132,7 @@ static void *print_copied_inodes(void *p)
 	while (1) {
 		count++;
 		pthread_mutex_lock(&priv->mutex);
-		printf("copy inodes [%c] [%10llu/%10llu]\r",
+		printf("Copy inodes [%c] [%10llu/%10llu]\r",
 		       work_indicator[count % 4],
 		       (unsigned long long)priv->cur_copy_inodes,
 		       (unsigned long long)priv->max_copy_inodes);
@@ -199,7 +206,7 @@ static int create_image_file_range(struct btrfs_trans_handle *trans,
 				      u32 convert_flags)
 {
 	struct cache_extent *cache;
-	struct btrfs_block_group_cache *bg_cache;
+	struct btrfs_block_group *bg_cache;
 	u64 len = *ret_len;
 	u64 disk_bytenr;
 	int i;
@@ -290,14 +297,20 @@ static int create_image_file_range(struct btrfs_trans_handle *trans,
 	if (disk_bytenr) {
 		/* Check if the range is in a data block group */
 		bg_cache = btrfs_lookup_block_group(root->fs_info, bytenr);
-		if (!bg_cache)
+		if (!bg_cache) {
+			error("missing data block for bytenr %llu", bytenr);
 			return -ENOENT;
-		if (!(bg_cache->flags & BTRFS_BLOCK_GROUP_DATA))
+		}
+		if (!(bg_cache->flags & BTRFS_BLOCK_GROUP_DATA)) {
+			error(
+	"data bytenr %llu is covered by non-data block group %llu flags 0x%llu",
+			      bytenr, bg_cache->start, bg_cache->flags);
 			return -EINVAL;
+		}
 
 		/* The extent should never cross block group boundary */
-		len = min_t(u64, len, bg_cache->key.objectid +
-			    bg_cache->key.offset - bytenr);
+		len = min_t(u64, len, bg_cache->start + bg_cache->length -
+				bytenr);
 	}
 
 	if (len != round_down(len, root->fs_info->sectorsize)) {
@@ -310,8 +323,15 @@ static int create_image_file_range(struct btrfs_trans_handle *trans,
 	if (ret < 0)
 		return ret;
 
-	if (datacsum)
+	if (datacsum) {
 		ret = csum_disk_extent(trans, root, bytenr, len);
+		if (ret < 0) {
+			errno = -ret;
+			error(
+		"failed to calculate csum for bytenr %llu len %llu: %m",
+			      bytenr, len);
+		}
+	}
 	*ret_len = len;
 	return ret;
 }
@@ -377,6 +397,7 @@ static int migrate_one_reserved_range(struct btrfs_trans_handle *trans,
 		}
 		eb->start = key.objectid;
 		eb->len = key.offset;
+		eb->fs_info = root->fs_info;
 
 		/* Write the data */
 		ret = write_and_map_eb(root->fs_info, eb);
@@ -653,6 +674,8 @@ static int calculate_available_space(struct btrfs_convert_context *cctx)
 			cur_off = cache->start;
 		cur_len = max(cache->start + cache->size - cur_off,
 			      min_stripe_size);
+		/* data chunks should never exceed device boundary */
+		cur_len = min(cctx->total_bytes - cur_off, cur_len);
 		ret = add_merge_cache_extent(data_chunks, cur_off, cur_len);
 		if (ret < 0)
 			goto out;
@@ -669,7 +692,7 @@ static int calculate_available_space(struct btrfs_convert_context *cctx)
 	cur_off = 0;
 	/*
 	 * Calculate free space
-	 * Always round up the start bytenr, to avoid metadata extent corss
+	 * Always round up the start bytenr, to avoid metadata extent cross
 	 * stripe boundary, as later mkfs_convert() won't have all the extent
 	 * allocation check
 	 */
@@ -709,9 +732,27 @@ out:
 	return ret;
 }
 
+static int copy_free_space_tree(struct btrfs_convert_context *cctx)
+{
+	struct cache_tree *src = &cctx->free_space;
+	struct cache_tree *dst = &cctx->free_space_initial;
+	struct cache_extent *cache;
+	int ret = 0;
+
+	for (cache = search_cache_extent(src, 0);
+	     cache;
+	     cache = next_cache_extent(cache)) {
+		ret = add_merge_cache_extent(dst, cache->start, cache->size);
+		if (ret < 0)
+			return ret;
+		cctx->free_bytes_initial += cache->size;
+	}
+	return ret;
+}
+
 /*
  * Read used space, and since we have the used space,
- * calcuate data_chunks and free for later mkfs
+ * calculate data_chunks and free for later mkfs
  */
 static int convert_read_used_space(struct btrfs_convert_context *cctx)
 {
@@ -722,7 +763,10 @@ static int convert_read_used_space(struct btrfs_convert_context *cctx)
 		return ret;
 
 	ret = calculate_available_space(cctx);
-	return ret;
+	if (ret < 0)
+		return ret;
+
+	return copy_free_space_tree(cctx);
 }
 
 /*
@@ -759,18 +803,34 @@ static int create_image(struct btrfs_root *root,
 
 	ret = btrfs_find_free_objectid(trans, root, BTRFS_FIRST_FREE_OBJECTID,
 				       &ino);
-	if (ret < 0)
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to find free objectid for root %llu: %m",
+			root->root_key.objectid);
 		goto out;
+	}
 	ret = btrfs_new_inode(trans, root, ino, 0400 | S_IFREG);
-	if (ret < 0)
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to create new inode for root %llu: %m",
+			root->root_key.objectid);
 		goto out;
+	}
 	ret = btrfs_change_inode_flags(trans, root, ino, flags);
-	if (ret < 0)
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to change inode flag for ino %llu root %llu: %m",
+			ino, root->root_key.objectid);
 		goto out;
+	}
 	ret = btrfs_add_link(trans, root, ino, BTRFS_FIRST_FREE_OBJECTID, name,
 			     strlen(name), BTRFS_FT_REG_FILE, NULL, 1, 0);
-	if (ret < 0)
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to link ino %llu to '/%s' in root %llu: %m",
+			ino, name, root->root_key.objectid);
 		goto out;
+	}
 
 	key.objectid = ino;
 	key.type = BTRFS_INODE_ITEM_KEY;
@@ -910,9 +970,7 @@ static int make_convert_data_block_groups(struct btrfs_trans_handle *trans,
 
 			len = min(max_chunk_size,
 				  cache->start + cache->size - cur);
-			ret = btrfs_alloc_data_chunk(trans, fs_info,
-					&cur_backup, len,
-					BTRFS_BLOCK_GROUP_DATA, 1);
+			ret = btrfs_alloc_data_chunk(trans, fs_info, &cur_backup, len);
 			if (ret < 0)
 				break;
 			ret = btrfs_make_block_group(trans, fs_info, 0,
@@ -946,7 +1004,7 @@ static int init_btrfs(struct btrfs_mkfs_config *cfg, struct btrfs_root *root,
 
 	/*
 	 * Don't alloc any metadata/system chunk, as we don't want
-	 * any meta/sys chunk allcated before all data chunks are inserted.
+	 * any meta/sys chunk allocated before all data chunks are inserted.
 	 * Or we screw up the chunk layout just like the old implement.
 	 */
 	fs_info->avoid_sys_chunk_alloc = 1;
@@ -957,7 +1015,7 @@ static int init_btrfs(struct btrfs_mkfs_config *cfg, struct btrfs_root *root,
 		ret = PTR_ERR(trans);
 		goto err;
 	}
-	ret = btrfs_fix_block_accounting(trans, root);
+	ret = btrfs_fix_block_accounting(trans);
 	if (ret)
 		goto err;
 	ret = make_convert_data_block_groups(trans, fs_info, cfg, cctx);
@@ -1008,26 +1066,23 @@ err:
 static int migrate_super_block(int fd, u64 old_bytenr)
 {
 	int ret;
-	struct extent_buffer *buf;
-	struct btrfs_super_block *super;
+	struct btrfs_super_block super;
+	u8 result[BTRFS_CSUM_SIZE] = {};
 	u32 len;
 	u32 bytenr;
 
-	buf = malloc(sizeof(*buf) + BTRFS_SUPER_INFO_SIZE);
-	if (!buf)
-		return -ENOMEM;
-
-	buf->len = BTRFS_SUPER_INFO_SIZE;
-	ret = pread(fd, buf->data, BTRFS_SUPER_INFO_SIZE, old_bytenr);
+	ret = pread(fd, &super, BTRFS_SUPER_INFO_SIZE, old_bytenr);
 	if (ret != BTRFS_SUPER_INFO_SIZE)
 		goto fail;
 
-	super = (struct btrfs_super_block *)buf->data;
-	BUG_ON(btrfs_super_bytenr(super) != old_bytenr);
-	btrfs_set_super_bytenr(super, BTRFS_SUPER_INFO_OFFSET);
+	BUG_ON(btrfs_super_bytenr(&super) != old_bytenr);
+	btrfs_set_super_bytenr(&super, BTRFS_SUPER_INFO_OFFSET);
 
-	csum_tree_block_size(buf, BTRFS_CRC32_SIZE, 0);
-	ret = pwrite(fd, buf->data, BTRFS_SUPER_INFO_SIZE,
+	btrfs_csum_data(NULL, btrfs_super_csum_type(&super),
+			(u8 *)&super + BTRFS_CSUM_SIZE, result,
+			BTRFS_SUPER_INFO_SIZE - BTRFS_CSUM_SIZE);
+	memcpy(&super.csum[0], result, BTRFS_CSUM_SIZE);
+	ret = pwrite(fd, &super , BTRFS_SUPER_INFO_SIZE,
 		BTRFS_SUPER_INFO_OFFSET);
 	if (ret != BTRFS_SUPER_INFO_SIZE)
 		goto fail;
@@ -1036,12 +1091,12 @@ static int migrate_super_block(int fd, u64 old_bytenr)
 	if (ret)
 		goto fail;
 
-	memset(buf->data, 0, BTRFS_SUPER_INFO_SIZE);
+	memset(&super, 0, BTRFS_SUPER_INFO_SIZE);
 	for (bytenr = 0; bytenr < BTRFS_SUPER_INFO_OFFSET; ) {
 		len = BTRFS_SUPER_INFO_OFFSET - bytenr;
 		if (len > BTRFS_SUPER_INFO_SIZE)
 			len = BTRFS_SUPER_INFO_SIZE;
-		ret = pwrite(fd, buf->data, len, bytenr);
+		ret = pwrite(fd, &super, len, bytenr);
 		if (ret != len) {
 			fprintf(stderr, "unable to zero fill device\n");
 			break;
@@ -1051,7 +1106,6 @@ static int migrate_super_block(int fd, u64 old_bytenr)
 	ret = 0;
 	fsync(fd);
 fail:
-	free(buf);
 	if (ret > 0)
 		ret = -1;
 	return ret;
@@ -1076,7 +1130,8 @@ static int convert_open_fs(const char *devname,
 }
 
 static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
-		const char *fslabel, int progress, u64 features)
+		const char *fslabel, int progress, u64 features, u16 csum_type,
+		char fsid[BTRFS_UUID_UNPARSED_SIZE])
 {
 	int ret;
 	int fd = -1;
@@ -1089,8 +1144,11 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 	char subvol_name[SOURCE_FS_NAME_LEN + 8];
 	struct task_ctx ctx;
 	char features_buf[64];
+	char fsid_str[BTRFS_UUID_UNPARSED_SIZE];
 	struct btrfs_mkfs_config mkfs_cfg;
+	bool btrfs_sb_committed = false;
 
+	memset(&mkfs_cfg, 0, sizeof(mkfs_cfg));
 	init_convert_context(&cctx);
 	ret = convert_open_fs(devname, &cctx);
 	if (ret)
@@ -1103,12 +1161,18 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 	if (ret)
 		goto fail;
 
+	ASSERT(cctx.total_bytes != 0);
 	blocksize = cctx.blocksize;
 	total_bytes = (u64)blocksize * (u64)cctx.block_count;
 	if (blocksize < 4096) {
 		error("block size is too small: %u < 4096", blocksize);
 		goto fail;
 	}
+	if (blocksize != getpagesize())
+		warning(
+"blocksize %u is not equal to the page size %u, converted filesystem won't mount on this system",
+			blocksize, getpagesize());
+
 	if (btrfs_check_nodesize(nodesize, blocksize, features))
 		goto fail;
 	fd = open(devname, O_RDWR);
@@ -1116,31 +1180,67 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 		error("unable to open %s: %m", devname);
 		goto fail;
 	}
-	btrfs_parse_features_to_string(features_buf, features);
+	btrfs_parse_fs_features_to_string(features_buf, features);
 	if (features == BTRFS_MKFS_DEFAULT_FEATURES)
 		strcat(features_buf, " (default)");
 
-	printf("create btrfs filesystem:\n");
-	printf("\tblocksize: %u\n", blocksize);
-	printf("\tnodesize:  %u\n", nodesize);
-	printf("\tfeatures:  %s\n", features_buf);
+	if (convert_flags & CONVERT_FLAG_COPY_FSID) {
+		uuid_unparse(cctx.fs_uuid, mkfs_cfg.fs_uuid);
+		if (!test_uuid_unique(mkfs_cfg.fs_uuid))
+			warning("non-unique UUID (copy): %s", mkfs_cfg.fs_uuid);
+	} else if (fsid[0] == 0) {
+		uuid_t uuid;
 
-	memset(&mkfs_cfg, 0, sizeof(mkfs_cfg));
-	mkfs_cfg.label = cctx.volume_name;
+		uuid_generate(uuid);
+		uuid_unparse(uuid, mkfs_cfg.fs_uuid);
+	} else {
+		memcpy(mkfs_cfg.fs_uuid, fsid, BTRFS_UUID_UNPARSED_SIZE);
+		if (!test_uuid_unique(mkfs_cfg.fs_uuid))
+			warning("non-unique UUID (user set): %s", mkfs_cfg.fs_uuid);
+	}
+
+	printf("Source filesystem:\n");
+	printf("  Type:           %s\n", cctx.convert_ops->name);
+	printf("  Label:          %s\n", cctx.label);
+	printf("  Blocksize:      %u\n", blocksize);
+	uuid_unparse(cctx.fs_uuid, fsid_str);
+	printf("  UUID:           %s\n", fsid_str);
+	printf("Target filesystem:\n");
+	printf("  Label:          %s\n", fslabel);
+	printf("  Blocksize:      %u\n", blocksize);
+	printf("  Nodesize:       %u\n", nodesize);
+	printf("  UUID:           %s\n", mkfs_cfg.fs_uuid);
+	printf("  Checksum:       %s\n", btrfs_super_csum_name(csum_type));
+	printf("  Features:       %s\n", features_buf);
+	printf("    Data csum:    %s\n", (convert_flags & CONVERT_FLAG_DATACSUM) ?  "yes" : "no");
+	printf("    Inline data:  %s\n", (convert_flags & CONVERT_FLAG_INLINE_DATA) ?  "yes" : "no");
+	printf("    Copy xattr:   %s\n", (convert_flags & CONVERT_FLAG_XATTR) ? "yes" : "no");
+	printf("Reported stats:\n");
+	printf("  Total space:    %12llu\n", cctx.total_bytes);
+	printf("  Free space:     %12llu (%.2f%%)\n", cctx.free_bytes_initial,
+			100.0 * cctx.free_bytes_initial / cctx.total_bytes);
+	printf("  Inode count:    %12llu\n", cctx.inodes_count);
+	printf("  Free inodes:    %12llu\n", cctx.free_inodes_count);
+	printf("  Block count:    %12llu\n", cctx.block_count);
+
+	mkfs_cfg.csum_type = csum_type;
+	mkfs_cfg.label = cctx.label;
 	mkfs_cfg.num_bytes = total_bytes;
 	mkfs_cfg.nodesize = nodesize;
 	mkfs_cfg.sectorsize = blocksize;
 	mkfs_cfg.stripesize = blocksize;
 	mkfs_cfg.features = features;
 
+	printf("Create initial btrfs filesystem\n");
 	ret = make_convert_btrfs(fd, &mkfs_cfg, &cctx);
 	if (ret) {
-		error("unable to create initial ctree: %s", strerror(-ret));
+		errno = -ret;
+		error("unable to create initial ctree: %m");
 		goto fail;
 	}
 
 	root = open_ctree_fd(fd, devname, mkfs_cfg.super_bytenr,
-			     OPEN_CTREE_WRITES | OPEN_CTREE_FS_PARTIAL);
+			     OPEN_CTREE_WRITES | OPEN_CTREE_TEMPORARY_SUPER);
 	if (!root) {
 		error("unable to open ctree");
 		goto fail;
@@ -1151,7 +1251,7 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 		goto fail;
 	}
 
-	printf("creating %s image file\n", cctx.convert_ops->name);
+	printf("Create %s image file\n", cctx.convert_ops->name);
 	snprintf(subvol_name, sizeof(subvol_name), "%s_saved",
 			cctx.convert_ops->name);
 	key.objectid = CONV_IMAGE_SUBVOL_OBJECTID;
@@ -1170,7 +1270,7 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 		goto fail;
 	}
 
-	printf("creating btrfs metadata\n");
+	printf("Create btrfs metadata\n");
 	ret = pthread_mutex_init(&ctx.mutex, NULL);
 	if (ret) {
 		error("failed to initialize mutex: %d", ret);
@@ -1182,7 +1282,7 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 	if (progress) {
 		ctx.info = task_init(print_copied_inodes, after_copied_inodes,
 				     &ctx);
-		task_start(ctx.info);
+		task_start(ctx.info, NULL, NULL);
 	}
 	ret = copy_inodes(&cctx, root, convert_flags, &ctx);
 	if (ret) {
@@ -1204,11 +1304,11 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 	memset(root->fs_info->super_copy->label, 0, BTRFS_LABEL_SIZE);
 	if (convert_flags & CONVERT_FLAG_COPY_LABEL) {
 		__strncpy_null(root->fs_info->super_copy->label,
-				cctx.volume_name, BTRFS_LABEL_SIZE - 1);
-		printf("copy label '%s'\n", root->fs_info->super_copy->label);
+				cctx.label, BTRFS_LABEL_SIZE - 1);
+		printf("Copy label '%s'\n", root->fs_info->super_copy->label);
 	} else if (convert_flags & CONVERT_FLAG_SET_LABEL) {
 		strcpy(root->fs_info->super_copy->label, fslabel);
-		printf("set label to '%s'\n", fslabel);
+		printf("Set label to '%s'\n", fslabel);
 	}
 
 	ret = close_ctree(root);
@@ -1228,9 +1328,10 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 		error("unable to migrate super block: %d", ret);
 		goto fail;
 	}
+	btrfs_sb_committed = true;
 
 	root = open_ctree_fd(fd, devname, 0,
-			OPEN_CTREE_WRITES | OPEN_CTREE_FS_PARTIAL);
+			     OPEN_CTREE_WRITES | OPEN_CTREE_TEMPORARY_SUPER);
 	if (!root) {
 		error("unable to open ctree for finalization");
 		goto fail;
@@ -1239,14 +1340,18 @@ static int do_convert(const char *devname, u32 convert_flags, u32 nodesize,
 	close_ctree(root);
 	close(fd);
 
-	printf("conversion complete\n");
+	printf("Conversion complete\n");
 	return 0;
 fail:
 	clean_convert_context(&cctx);
 	if (fd != -1)
 		close(fd);
-	warning(
-"an error occurred during conversion, filesystem is partially created but not finalized and not mountable");
+	if (btrfs_sb_committed)
+		warning(
+"error during conversion, filesystem is partially created but not finalized and not mountable");
+	else
+		warning(
+"error during conversion, the original filesystem is not modified");
 	return -1;
 }
 
@@ -1314,7 +1419,7 @@ static bool is_chunk_direct_mapped(struct btrfs_fs_info *fs_info, u64 start)
 	if (map->num_stripes != 1)
 		goto out;
 
-	/* Chunk's logical doesn't match with phisical, not 1:1 mapped */
+	/* Chunk's logical doesn't match with physical, not 1:1 mapped */
 	if (map->ce.start != map->stripes[0].physical)
 		goto out;
 	ret = true;
@@ -1326,7 +1431,7 @@ out:
  * Iterate all file extents of the convert image.
  *
  * All file extents except ones in btrfs_reserved_ranges must be mapped 1:1
- * on disk. (Means thier file_offset must match their on disk bytenr)
+ * on disk. (Means their file_offset must match their on disk bytenr)
  *
  * File extents in reserved ranges can be relocated to other place, and in
  * that case we will read them out for later use.
@@ -1353,8 +1458,8 @@ static int check_convert_image(struct btrfs_root *image_root, u64 ino,
 	 * So we only need to check if ret < 0
 	 */
 	if (ret < 0) {
-		error("failed to iterate file extents at offset 0: %s",
-			strerror(-ret));
+		errno = -ret;
+		error("failed to iterate file extents at offset 0: %m");
 		btrfs_release_path(&path);
 		return ret;
 	}
@@ -1503,7 +1608,11 @@ static int do_rollback(const char *devname)
 	struct btrfs_path path;
 	struct btrfs_dir_item *dir;
 	struct btrfs_inode_item *inode_item;
+	struct btrfs_root_ref *root_ref_item;
 	char *image_name = "image";
+	char dir_name[PATH_MAX];
+	int name_len;
+	char fsid_str[BTRFS_UUID_UNPARSED_SIZE];
 	char *reserved_ranges[ARRAY_SIZE(btrfs_reserved_ranges)] = { NULL };
 	u64 total_bytes;
 	u64 fsize;
@@ -1512,6 +1621,8 @@ static int do_rollback(const char *devname)
 	int fd = -1;
 	int ret;
 	int i;
+
+	printf("Open filesystem for rollback:\n");
 
 	for (i = 0; i < ARRAY_SIZE(btrfs_reserved_ranges); i++) {
 		const struct simple_range *range = &btrfs_reserved_ranges[i];
@@ -1543,6 +1654,10 @@ static int do_rollback(const char *devname)
 	}
 	fs_info = root->fs_info;
 
+	printf("  Label:           %s\n", fs_info->super_copy->label);
+	uuid_unparse(fs_info->super_copy->fsid, fsid_str);
+	printf("  UUID:            %s\n", fsid_str);
+
 	/*
 	 * Search root backref first, or after subvolume deletion (orphan),
 	 * we can still rollback the image.
@@ -1552,16 +1667,27 @@ static int do_rollback(const char *devname)
 	key.offset = BTRFS_FS_TREE_OBJECTID;
 	btrfs_init_path(&path);
 	ret = btrfs_search_slot(NULL, fs_info->tree_root, &key, &path, 0, 0);
-	btrfs_release_path(&path);
 	if (ret > 0) {
 		error("unable to find source fs image subvolume, is it deleted?");
 		ret = -ENOENT;
 		goto close_fs;
 	} else if (ret < 0) {
-		error("failed to find source fs image subvolume: %s",
-			strerror(-ret));
+		errno = -ret;
+		error("failed to find source fs image subvolume: %m");
 		goto close_fs;
 	}
+	/* (256 ROOT_BACKREF 5) */
+	/* root backref key dirid 256 sequence 3 name ext2_saved */
+	root_ref_item = btrfs_item_ptr(path.nodes[0], path.slots[0], struct btrfs_root_ref);
+	name_len = btrfs_root_ref_name_len(path.nodes[0], root_ref_item);
+	if (name_len > sizeof(dir_name))
+		name_len = sizeof(dir_name) - 1;
+	read_extent_buffer(path.nodes[0], dir_name, (unsigned long)(root_ref_item + 1), name_len);
+	dir_name[sizeof(dir_name) - 1] = 0;
+
+	printf("  Restoring from:  %s/%s\n", dir_name, image_name);
+
+	btrfs_release_path(&path);
 
 	/* Search convert subvolume */
 	key.objectid = CONV_IMAGE_SUBVOL_OBJECTID;
@@ -1570,8 +1696,8 @@ static int do_rollback(const char *devname)
 	image_root = btrfs_read_fs_root(fs_info, &key);
 	if (IS_ERR(image_root)) {
 		ret = PTR_ERR(image_root);
-		error("failed to open convert image subvolume: %s",
-			strerror(-ret));
+		errno = -ret;
+		error("failed to open convert image subvolume: %m");
 		goto close_fs;
 	}
 
@@ -1586,8 +1712,8 @@ static int do_rollback(const char *devname)
 			ret = PTR_ERR(dir);
 		else
 			ret = -ENOENT;
-		error("failed to locate file %s: %s", image_name,
-			strerror(-ret));
+		errno = -ret;
+		error("failed to locate file %s: %m", image_name);
 		goto close_fs;
 	}
 	btrfs_dir_item_key_to_cpu(path.nodes[0], dir, &key);
@@ -1600,7 +1726,8 @@ static int do_rollback(const char *devname)
 
 	if (ret < 0) {
 		btrfs_release_path(&path);
-		error("unable to find inode %llu: %s", ino, strerror(-ret));
+		errno = -ret;
+		error("unable to find inode %llu: %m", ino);
 		goto close_fs;
 	}
 	inode_item = btrfs_item_ptr(path.nodes[0], path.slots[0],
@@ -1642,8 +1769,9 @@ close_fs:
 				ret = -errno;
 			else
 				ret = -EIO;
-			error("failed to recover range [%llu, %llu): %s",
-			      range->start, real_size, strerror(-ret));
+			errno = -ret;
+			error("failed to recover range [%llu, %llu): %m",
+			      range->start, real_size);
 			goto free_mem;
 		}
 		ret = 0;
@@ -1655,7 +1783,7 @@ free_mem:
 	if (ret)
 		error("rollback failed");
 	else
-		printf("rollback succeeded\n");
+		printf("Rollback succeeded\n");
 	return ret;
 }
 
@@ -1666,10 +1794,13 @@ static void print_usage(void)
 	printf("\t-d|--no-datasum        disable data checksum, sets NODATASUM\n");
 	printf("\t-i|--no-xattr          ignore xattrs and ACLs\n");
 	printf("\t-n|--no-inline         disable inlining of small files to metadata\n");
+	printf("\t--csum TYPE\n");
+	printf("\t--checksum TYPE        checksum algorithm to use (default: crc32c)\n");
 	printf("\t-N|--nodesize SIZE     set filesystem metadata nodesize\n");
 	printf("\t-r|--rollback          roll back to the original filesystem\n");
 	printf("\t-l|--label LABEL       set filesystem label\n");
 	printf("\t-L|--copy-label        use label from converted filesystem\n");
+	printf("\t--uuid SPEC            new, copy or user-defined conforming UUID\n");
 	printf("\t-p|--progress          show converting progress (default)\n");
 	printf("\t-O|--features LIST     comma separated list of filesystem features\n");
 	printf("\t--no-progress          show only overview, not the detailed progress\n");
@@ -1679,7 +1810,7 @@ static void print_usage(void)
 	printf("\treiserfs: %s\n", BTRFSCONVERT_REISERFS ? "yes" : "no");
 }
 
-int main(int argc, char *argv[])
+int BOX_MAIN(convert)(int argc, char *argv[])
 {
 	int ret;
 	int packing = 1;
@@ -1694,20 +1825,32 @@ int main(int argc, char *argv[])
 	char *file;
 	char fslabel[BTRFS_LABEL_SIZE];
 	u64 features = BTRFS_MKFS_DEFAULT_FEATURES;
+	u16 csum_type = BTRFS_CSUM_TYPE_CRC32;
+	u32 copy_fsid = 0;
+	char fsid[BTRFS_UUID_UNPARSED_SIZE] = {0};
+
+	crc32c_optimization_init();
+	printf("btrfs-convert from %s\n\n", PACKAGE_STRING);
 
 	while(1) {
-		enum { GETOPT_VAL_NO_PROGRESS = 256 };
+		enum { GETOPT_VAL_NO_PROGRESS = 256, GETOPT_VAL_CHECKSUM,
+			GETOPT_VAL_UUID };
 		static const struct option long_options[] = {
 			{ "no-progress", no_argument, NULL,
 				GETOPT_VAL_NO_PROGRESS },
 			{ "no-datasum", no_argument, NULL, 'd' },
 			{ "no-inline", no_argument, NULL, 'n' },
 			{ "no-xattr", no_argument, NULL, 'i' },
+			{ "checksum", required_argument, NULL,
+				GETOPT_VAL_CHECKSUM },
+			{ "csum", required_argument, NULL,
+				GETOPT_VAL_CHECKSUM },
 			{ "rollback", no_argument, NULL, 'r' },
 			{ "features", required_argument, NULL, 'O' },
 			{ "progress", no_argument, NULL, 'p' },
 			{ "label", required_argument, NULL, 'l' },
 			{ "copy-label", no_argument, NULL, 'L' },
+			{ "uuid", required_argument, NULL, GETOPT_VAL_UUID },
 			{ "nodesize", required_argument, NULL, 'N' },
 			{ "help", no_argument, NULL, GETOPT_VAL_HELP},
 			{ NULL, 0, NULL, 0 }
@@ -1727,7 +1870,7 @@ int main(int argc, char *argv[])
 				packing = 0;
 				break;
 			case 'N':
-				nodesize = parse_size(optarg);
+				nodesize = parse_size_from_string(optarg);
 				break;
 			case 'r':
 				rollback = 1;
@@ -1767,7 +1910,7 @@ int main(int argc, char *argv[])
 				if (features & ~BTRFS_CONVERT_ALLOWED_FEATURES) {
 					char buf[64];
 
-					btrfs_parse_features_to_string(buf,
+					btrfs_parse_fs_features_to_string(buf,
 						features & ~BTRFS_CONVERT_ALLOWED_FEATURES);
 					error("features not allowed for convert: %s",
 						buf);
@@ -1778,6 +1921,26 @@ int main(int argc, char *argv[])
 				}
 			case GETOPT_VAL_NO_PROGRESS:
 				progress = 0;
+				break;
+			case GETOPT_VAL_CHECKSUM:
+				csum_type = parse_csum_type(optarg);
+				break;
+			case GETOPT_VAL_UUID:
+				copy_fsid = 0;
+				fsid[0] = 0;
+				if (strcmp(optarg, "copy") == 0) {
+					copy_fsid = CONVERT_FLAG_COPY_FSID;
+				} else if (strcmp(optarg, "new") == 0) {
+					/* Generated later */
+				} else {
+					uuid_t uuid;
+
+					if (uuid_parse(optarg, uuid) != 0) {
+						error("invalid UUID: %s\n", optarg);
+						return 1;
+					}
+					strncpy(fsid, optarg, sizeof(fsid));
+				}
 				break;
 			case GETOPT_VAL_HELP:
 			default:
@@ -1805,7 +1968,8 @@ int main(int argc, char *argv[])
 	file = argv[optind];
 	ret = check_mounted(file);
 	if (ret < 0) {
-		error("could not check mount status: %s", strerror(-ret));
+		errno = -ret;
+		error("could not check mount status: %m");
 		return 1;
 	} else if (ret) {
 		error("%s is mounted", file);
@@ -1820,8 +1984,10 @@ int main(int argc, char *argv[])
 		cf |= datacsum ? CONVERT_FLAG_DATACSUM : 0;
 		cf |= packing ? CONVERT_FLAG_INLINE_DATA : 0;
 		cf |= noxattr ? 0 : CONVERT_FLAG_XATTR;
+		cf |= copy_fsid;
 		cf |= copylabel;
-		ret = do_convert(file, cf, nodesize, fslabel, progress, features);
+		ret = do_convert(file, cf, nodesize, fslabel, progress, features,
+				 csum_type, fsid);
 	}
 	if (ret)
 		return 1;

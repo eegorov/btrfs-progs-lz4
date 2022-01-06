@@ -19,9 +19,9 @@
 #include "kerncompat.h"
 #include <linux/limits.h>
 #include <pthread.h>
-#include "disk-io.h"
-#include "transaction.h"
-#include "utils.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
 #include "convert/common.h"
 #include "convert/source-ext2.h"
 
@@ -43,6 +43,12 @@ static int ext2_open_fs(struct btrfs_convert_context *cctx, const char *name)
 			fprintf(stderr, "ext2fs_open: %s\n", error_message(ret));
 		return -1;
 	}
+
+	if (ext2_fs->super->s_feature_incompat & EXT3_FEATURE_INCOMPAT_RECOVER) {
+		error("source filesystem requires recovery, run e2fsck first");
+		goto fail;
+	}
+
 	/*
 	 * We need to know exactly the used space, some RO compat flags like
 	 * BIGALLOC will affect how used space is present.
@@ -87,11 +93,12 @@ static int ext2_open_fs(struct btrfs_convert_context *cctx, const char *name)
 	cctx->fs_data = ext2_fs;
 	cctx->blocksize = ext2_fs->blocksize;
 	cctx->block_count = ext2_fs->super->s_blocks_count;
-	cctx->total_bytes = ext2_fs->blocksize * ext2_fs->super->s_blocks_count;
-	cctx->volume_name = strndup(ext2_fs->super->s_volume_name, 16);
+	cctx->total_bytes = (u64)ext2_fs->super->s_blocks_count * ext2_fs->blocksize;
+	cctx->label = strndup((char *)ext2_fs->super->s_volume_name, 16);
 	cctx->first_data_block = ext2_fs->super->s_first_data_block;
 	cctx->inodes_count = ext2_fs->super->s_inodes_count;
 	cctx->free_inodes_count = ext2_fs->super->s_free_inodes_count;
+	memcpy(cctx->fs_uuid, ext2_fs->super->s_uuid, SOURCE_FS_UUID_SIZE);
 	return 0;
 fail:
 	ext2fs_close(ext2_fs);
@@ -162,8 +169,8 @@ static int ext2_read_used_space(struct btrfs_convert_context *cctx)
 		}
 		ret = __ext2_add_one_block(fs, block_bitmap, i, used_tree);
 		if (ret < 0) {
-			error("fail to build used space tree, %s",
-			      strerror(-ret));
+			errno = -ret;
+			error("fail to build used space tree, %m");
 			break;
 		}
 		blk_itr += EXT2_CLUSTERS_PER_GROUP(fs->super);
@@ -175,9 +182,9 @@ static int ext2_read_used_space(struct btrfs_convert_context *cctx)
 
 static void ext2_close_fs(struct btrfs_convert_context *cctx)
 {
-	if (cctx->volume_name) {
-		free(cctx->volume_name);
-		cctx->volume_name = NULL;
+	if (cctx->label) {
+		free(cctx->label);
+		cctx->label = NULL;
 	}
 	ext2fs_close(cctx->fs_data);
 	ext2fs_free(cctx->fs_data);
@@ -310,7 +317,7 @@ static int ext2_create_file_extents(struct btrfs_trans_handle *trans,
 	if (ret)
 		goto fail;
 	if ((convert_flags & CONVERT_FLAG_INLINE_DATA) && data.first_block == 0
-	    && data.num_blocks > 0
+	    && data.num_blocks > 0 && inode_size < sectorsize
 	    && inode_size <= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info)) {
 		u64 num_bytes = data.num_blocks * sectorsize;
 		u64 disk_bytenr = data.disk_block * sectorsize;
@@ -523,7 +530,7 @@ static int ext2_copy_single_xattr(struct btrfs_trans_handle *trans,
 	strncat(namebuf, EXT2_EXT_ATTR_NAME(entry), entry->e_name_len);
 	if (name_len + datalen > BTRFS_LEAF_DATA_SIZE(root->fs_info) -
 	    sizeof(struct btrfs_item) - sizeof(struct btrfs_dir_item)) {
-		fprintf(stderr, "skip large xattr on inode %Lu name %.*s\n",
+		fprintf(stderr, "skip large xattr on inode %llu name %.*s\n",
 			objectid - INO_OFFSET, name_len, namebuf);
 		goto out;
 	}
@@ -691,6 +698,97 @@ static void ext2_copy_inode_item(struct btrfs_inode_item *dst,
 	}
 	memset(&dst->reserved, 0, sizeof(dst->reserved));
 }
+
+#if HAVE_EXT4_EPOCH_MASK_DEFINE
+
+/*
+ * Copied and modified from fs/ext4/ext4.h
+ */
+static inline void ext4_decode_extra_time(__le32 * tv_sec, __le32 * tv_nsec,
+                                          __le32 extra)
+{
+        if (extra & cpu_to_le32(EXT4_EPOCH_MASK))
+                *tv_sec += (u64)(le32_to_cpu(extra) & EXT4_EPOCH_MASK) << 32;
+        *tv_nsec = (le32_to_cpu(extra) & EXT4_NSEC_MASK) >> EXT4_EPOCH_BITS;
+}
+
+#define EXT4_COPY_XTIME(xtime, dst, tv_sec, tv_nsec)					\
+do {											\
+	tv_sec = src->i_ ## xtime ;							\
+	if (inode_includes(inode_size, i_ ## xtime ## _extra)) {			\
+		tv_sec = src->i_ ## xtime ;						\
+		ext4_decode_extra_time(&tv_sec, &tv_nsec, src->i_ ## xtime ## _extra);	\
+		btrfs_set_stack_timespec_sec(&dst->xtime , tv_sec);			\
+		btrfs_set_stack_timespec_nsec(&dst->xtime , tv_nsec);			\
+	} else {									\
+		btrfs_set_stack_timespec_sec(&dst->xtime , tv_sec);			\
+		btrfs_set_stack_timespec_nsec(&dst->xtime , 0);				\
+	}										\
+} while (0);
+
+/*
+ * Decode and copy i_[cma]time_extra and i_crtime{,_extra} field
+ */
+static int ext4_copy_inode_timespec_extra(struct btrfs_inode_item *dst,
+				ext2_ino_t ext2_ino, u32 s_inode_size,
+				ext2_filsys ext2_fs)
+{
+	struct ext2_inode_large *src;
+	u32 inode_size, tv_sec, tv_nsec;
+	int ret, err;
+	ret = 0;
+
+	src = (struct ext2_inode_large *)malloc(s_inode_size);
+	if (!src)
+		return -ENOMEM;
+	err = ext2fs_read_inode_full(ext2_fs, ext2_ino, (void *)src,
+				     s_inode_size);
+	if (err) {
+		fprintf(stderr, "ext2fs_read_inode_full: %s\n", error_message(err));
+		ret = -1;
+		goto out;
+	}
+
+	inode_size = EXT2_GOOD_OLD_INODE_SIZE + src->i_extra_isize;
+
+	EXT4_COPY_XTIME(atime, dst, tv_sec, tv_nsec);
+	EXT4_COPY_XTIME(mtime, dst, tv_sec, tv_nsec);
+	EXT4_COPY_XTIME(ctime, dst, tv_sec, tv_nsec);
+
+	tv_sec = src->i_crtime;
+	if (inode_includes(inode_size, i_crtime_extra)) {
+		tv_sec = src->i_crtime;
+		ext4_decode_extra_time(&tv_sec, &tv_nsec, src->i_crtime_extra);
+		btrfs_set_stack_timespec_sec(&dst->otime, tv_sec);
+		btrfs_set_stack_timespec_nsec(&dst->otime, tv_nsec);
+	} else {
+		btrfs_set_stack_timespec_sec(&dst->otime, tv_sec);
+		btrfs_set_stack_timespec_nsec(&dst->otime, 0);
+	}
+out:
+	free(src);
+	return ret;
+}
+
+#else /* HAVE_EXT4_EPOCH_MASK_DEFINE */
+
+static int ext4_copy_inode_timespec_extra(struct btrfs_inode_item *dst,
+				ext2_ino_t ext2_ino, u32 s_inode_size,
+				ext2_filsys ext2_fs)
+{
+	static int warn = 0;
+
+	if (!warn) {
+		warning(
+"extended inode (size %u) found but e2fsprogs don't support reading extra timespec",
+			s_inode_size);
+		warn = 1;
+	}
+	return 0;
+}
+
+#endif /* !HAVE_EXT4_EPOCH_MASK_DEFINE */
+
 static int ext2_check_state(struct btrfs_convert_context *cctx)
 {
 	ext2_filsys fs = cctx->fs_data;
@@ -739,12 +837,21 @@ static int ext2_copy_single_inode(struct btrfs_trans_handle *trans,
 			     u32 convert_flags)
 {
 	int ret;
+	int s_inode_size;
 	struct btrfs_inode_item btrfs_inode;
 
 	if (ext2_inode->i_links_count == 0)
 		return 0;
 
 	ext2_copy_inode_item(&btrfs_inode, ext2_inode, ext2_fs->blocksize);
+	s_inode_size = EXT2_INODE_SIZE(ext2_fs->super);
+	if (s_inode_size > EXT2_GOOD_OLD_INODE_SIZE) {
+		ret = ext4_copy_inode_timespec_extra(&btrfs_inode, ext2_ino,
+				s_inode_size, ext2_fs);
+		if (ret)
+			return ret;
+	}
+
 	if (!(convert_flags & CONVERT_FLAG_DATACSUM)
 	    && S_ISREG(ext2_inode->i_mode)) {
 		u32 flags = btrfs_stack_inode_flags(&btrfs_inode) |
@@ -797,7 +904,7 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 			    u32 convert_flags, struct task_ctx *p)
 {
 	ext2_filsys ext2_fs = cctx->fs_data;
-	int ret;
+	int ret = 0;
 	errcode_t err;
 	ext2_inode_scan ext2_scan;
 	struct ext2_inode ext2_inode;
@@ -810,8 +917,9 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 		return PTR_ERR(trans);
 	err = ext2fs_open_inode_scan(ext2_fs, 0, &ext2_scan);
 	if (err) {
-		fprintf(stderr, "ext2fs_open_inode_scan: %s\n", error_message(err));
-		return -1;
+		error("ext2fs_open_inode_scan failed: %s", error_message(err));
+		btrfs_commit_transaction(trans, root);
+		return -EIO;
 	}
 	while (!(err = ext2fs_get_next_inode(ext2_scan, &ext2_ino,
 					     &ext2_inode))) {
@@ -827,21 +935,51 @@ static int ext2_copy_inodes(struct btrfs_convert_context *cctx,
 		pthread_mutex_lock(&p->mutex);
 		p->cur_copy_inodes++;
 		pthread_mutex_unlock(&p->mutex);
-		if (ret)
-			return ret;
-		if (trans->blocks_used >= 4096) {
+		if (ret) {
+			error("failed to copy ext2 inode %llu: %d",
+					(unsigned long long)ext2_ino, ret);
+			goto out;
+		}
+		/*
+		 * blocks_used is the number of new tree blocks allocated in
+		 * current transaction.
+		 * Use a small amount of it to workaround a bug where delayed
+		 * ref may fail to locate tree blocks in extent tree.
+		 *
+		 * 2M is the threshold to kick chunk preallocator into work,
+		 * For default (16K) nodesize it will be 128 tree blocks,
+		 * large enough to contain over 300 inlined files or
+		 * around 26k file extents. Which should be good enough.
+		 */
+		if (trans->blocks_used >= SZ_2M / root->fs_info->nodesize) {
 			ret = btrfs_commit_transaction(trans, root);
-			BUG_ON(ret);
+			if (ret < 0) {
+				error("failed to commit transaction: %d", ret);
+				goto out;
+			}
 			trans = btrfs_start_transaction(root, 1);
-			BUG_ON(IS_ERR(trans));
+			if (IS_ERR(trans)) {
+				ret = PTR_ERR(trans);
+				error("failed to start transaction: %d", ret);
+				trans = NULL;
+				goto out;
+			}
 		}
 	}
 	if (err) {
-		fprintf(stderr, "ext2fs_get_next_inode: %s\n", error_message(err));
-		return -1;
+		error("ext2fs_get_next_inode failed: %s", error_message(err));
+		ret = -EIO;
+		goto out;
 	}
-	ret = btrfs_commit_transaction(trans, root);
-	BUG_ON(ret);
+out:
+	if (ret < 0) {
+		if (trans)
+			btrfs_abort_transaction(trans, ret);
+	} else {
+		ret = btrfs_commit_transaction(trans, root);
+		if (ret < 0)
+			error("failed to commit transaction: %d", ret);
+	}
 	ext2fs_close_inode_scan(ext2_scan);
 
 	return ret;

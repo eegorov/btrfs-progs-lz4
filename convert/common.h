@@ -16,15 +16,17 @@
 
 /*
  * Defines and function declarations for users of the mkfs API, no internal
- * defintions.
+ * definitions.
  */
 
 #ifndef __BTRFS_CONVERT_COMMON_H__
 #define __BTRFS_CONVERT_COMMON_H__
 
 #include "kerncompat.h"
-#include "common-defs.h"
-#include "extent-cache.h"
+#include "common/defs.h"
+#include "common/extent-cache.h"
+
+#define SOURCE_FS_UUID_SIZE	(16)
 
 struct btrfs_mkfs_config;
 
@@ -35,7 +37,9 @@ struct btrfs_convert_context {
 	u64 inodes_count;
 	u64 free_inodes_count;
 	u64 total_bytes;
-	char *volume_name;
+	u64 free_bytes_initial;
+	char *label;
+	u8 fs_uuid[SOURCE_FS_UUID_SIZE];
 	const struct btrfs_convert_operations *convert_ops;
 
 	/* The accurate used space of old filesystem */
@@ -47,6 +51,13 @@ struct btrfs_convert_context {
 	/* Free space which is not covered by data_chunks */
 	struct cache_tree free_space;
 
+	/*
+	 * Free space reserved for ENOSPC report, it's just a copy free_space.
+	 * But after initial calculation, free_space_initial is no longer
+	 * updated, so we have a good idea on how much free space we really
+	 * have for btrfs.
+	 */
+	struct cache_tree free_space_initial;
 	void *fs_data;
 };
 

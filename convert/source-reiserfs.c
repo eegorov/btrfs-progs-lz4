@@ -17,15 +17,14 @@
 #if BTRFSCONVERT_REISERFS
 
 #include "kerncompat.h"
-#include <linux/limits.h>
 #include <linux/fs.h>
 #include <limits.h>
 #include <sys/stat.h>
 #include <stdbool.h>
-#include "disk-io.h"
-#include "transaction.h"
-#include "utils.h"
-#include "bitops.h"
+#include "kernel-shared/disk-io.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
+#include "kernel-lib/bitops.h"
 #include "convert/common.h"
 #include "convert/source-reiserfs.h"
 
@@ -82,11 +81,12 @@ static int reiserfs_open_fs(struct btrfs_convert_context *cxt, const char *name)
 	cxt->fs_data = fs;
 	cxt->blocksize = fs->fs_blocksize;
 	cxt->block_count = get_sb_block_count(fs->fs_ondisk_sb);
-	cxt->total_bytes = cxt->blocksize * cxt->block_count;
-	cxt->volume_name = strndup(fs->fs_ondisk_sb->s_label, 16);
+	cxt->total_bytes = (u64)cxt->block_count * cxt->blocksize;
+	cxt->label = strndup(fs->fs_ondisk_sb->s_label, 16);
 	cxt->first_data_block = 0;
 	cxt->inodes_count = reiserfs_count_objectids(fs);
 	cxt->free_inodes_count = 0;
+	memcpy(cxt->fs_uuid, fs->fs_ondisk_sb->s_uuid, SOURCE_FS_UUID_SIZE);
 	info = calloc(1, sizeof(*info));
 	if (!info) {
 		reiserfs_close(fs);
@@ -301,7 +301,7 @@ static int reiserfs_record_indirect_extent(reiserfs_filsys_t fs, u64 position,
 
 /*
  * Unlike btrfs inline extents, reiserfs can have multiple inline extents.
- * This handles concatanating multiple tails into one inline extent
+ * This handles concatenating multiple tails into one inline extent
  * for insertion.
  */
 static int reiserfs_record_direct_extent(reiserfs_filsys_t fs, __u64 position,
@@ -350,8 +350,7 @@ static int convert_direct(struct btrfs_trans_handle *trans,
 	if (ret)
 		return ret;
 
-	eb = alloc_extent_buffer(&root->fs_info->extent_cache, key.objectid,
-				 sectorsize);
+	eb = alloc_extent_buffer(root->fs_info, key.objectid, sectorsize);
 
 	if (!eb)
 		return -ENOMEM;
@@ -376,7 +375,8 @@ static int reiserfs_convert_tail(struct btrfs_trans_handle *trans,
 	u64 isize;
 	int ret;
 
-	if (length >= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info))
+	if (length >= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info) ||
+	    length >= root->fs_info->sectorsize)
 		return convert_direct(trans, root, objectid, inode, body,
 				      length, offset, convert_flags);
 
@@ -493,10 +493,10 @@ static int reiserfs_copy_dirent(reiserfs_filsys_t fs,
 	ret = reiserfs_copy_meta(fs, root, dirent_data->convert_flags,
 				 deh_dirid, deh_objectid, &type);
 	if (ret) {
+		errno = -ret;
 		error(
-	"an error occured while converting \"%.*s\", reiserfs key [%u %u]: %s",
-			(int)len, name, deh_dirid, deh_objectid,
-			strerror(-ret));
+	"an error occurred while converting \"%.*s\", reiserfs key [%u %u]: %m",
+			(int)len, name, deh_dirid, deh_objectid);
 		return ret;
 	}
 	trans = btrfs_start_transaction(root, 1);
@@ -564,7 +564,7 @@ static int reiserfs_copy_meta(reiserfs_filsys_t fs, struct btrfs_root *root,
 	};
 
 	/* The root directory's dirid in reiserfs points to an object
-	 * that does't exist.  In btrfs it's self-referential.
+	 * that doesn't exist.  In btrfs it's self-referential.
 	 */
 	if (deh_dirid == REISERFS_ROOT_PARENT_OBJECTID)
 		parent = objectid;

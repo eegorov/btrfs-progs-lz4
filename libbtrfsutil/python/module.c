@@ -5,7 +5,7 @@
  *
  * libbtrfsutil is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
+ * the Free Software Foundation, either version 2.1 of the License, or
  * (at your option) any later version.
  *
  * libbtrfsutil is distributed in the hope that it will be useful,
@@ -233,23 +233,26 @@ static PyMethodDef btrfsutil_methods[] = {
 	 "this ID instead of the given path"},
 	{"create_subvolume", (PyCFunction)create_subvolume,
 	 METH_VARARGS | METH_KEYWORDS,
-	 "create_subvolume(path, async=False)\n\n"
+	 "create_subvolume(path, async_=False, qgroup_inherit=None)\n\n"
 	 "Create a new subvolume.\n\n"
 	 "Arguments:\n"
 	 "path -- string, bytes, or path-like object\n"
-	 "async -- create the subvolume without waiting for it to commit to\n"
-	 "disk and return the transaction ID"},
+	 "async_ -- no longer used\n"
+	 "qgroup_inherit -- optional QgroupInherit object of qgroups to\n"
+	 "inherit from"},
 	{"create_snapshot", (PyCFunction)create_snapshot,
 	 METH_VARARGS | METH_KEYWORDS,
-	 "create_snapshot(source, path, recursive=False, read_only=False, async=False)\n\n"
+	 "create_snapshot(source, path, recursive=False, read_only=False,\n"
+	 "                async_=False, qgroup_inherit=None)\n\n"
 	 "Create a new snapshot.\n\n"
 	 "Arguments:\n"
 	 "source -- string, bytes, path-like object, or open file descriptor\n"
 	 "path -- string, bytes, or path-like object\n"
 	 "recursive -- also snapshot child subvolumes\n"
 	 "read_only -- create a read-only snapshot\n"
-	 "async -- create the subvolume without waiting for it to commit to\n"
-	 "disk and return the transaction ID"},
+	 "async_ -- no longer used\n"
+	 "qgroup_inherit -- optional QgroupInherit object of qgroups to\n"
+	 "inherit from"},
 	{"delete_subvolume", (PyCFunction)delete_subvolume,
 	 METH_VARARGS | METH_KEYWORDS,
 	 "delete_subvolume(path, recursive=False)\n\n"

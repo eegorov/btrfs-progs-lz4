@@ -20,11 +20,9 @@
 #include "kerncompat.h"
 #include "kernel-lib/rbtree.h"
 #include "kernel-lib/list.h"
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 
-#define HEADER_MAGIC		0xbd5c25e27295668bULL
-#define MAX_PENDING_SIZE	(256 * 1024)
-#define BLOCK_SIZE		1024
+#define BLOCK_SIZE		SZ_1K
 #define BLOCK_MASK		(BLOCK_SIZE - 1)
 
 #define ITEMS_PER_CLUSTER ((BLOCK_SIZE - sizeof(struct meta_cluster)) / \
@@ -32,6 +30,16 @@
 
 #define COMPRESS_NONE		0
 #define COMPRESS_ZLIB		1
+
+struct dump_version {
+	u64 magic_cpu;
+	int version;
+	int max_pending_size;
+	unsigned int extra_sb_flags:1;
+};
+
+extern const struct dump_version dump_versions[];
+const extern struct dump_version *current_version;
 
 struct meta_cluster_item {
 	__le64 bytenr;
@@ -55,7 +63,7 @@ struct fs_chunk {
 	u64 logical;
 	u64 physical;
 	/*
-	 * physical_dup only store additonal physical for BTRFS_BLOCK_GROUP_DUP
+	 * physical_dup only store additional physical for BTRFS_BLOCK_GROUP_DUP
 	 * currently restore only support single and DUP
 	 * TODO: modify this structure and the function related to this
 	 * structure for support RAID*

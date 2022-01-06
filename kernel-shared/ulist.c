@@ -2,11 +2,25 @@
  * Copyright (C) 2011 STRATO AG
  * written by Arne Jansen <sensille@gmx.net>
  * Distributed under the GNU GPL license version 2.
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public
+ * License v2 as published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
 #include "kerncompat.h"
 #include "ulist.h"
-#include "ctree.h"
+#include "kernel-shared/ctree.h"
 
 /*
  * ulist is a generic data structure to hold a collection of unique u64
@@ -52,13 +66,13 @@ void ulist_init(struct ulist *ulist)
 }
 
 /**
- * ulist_fini - free up additionally allocated memory for the ulist
+ * ulist_release - free up additionally allocated memory for the ulist
  * @ulist:	the ulist from which to free the additional memory
  *
  * This is useful in cases where the base 'struct ulist' has been statically
  * allocated.
  */
-static void ulist_fini(struct ulist *ulist)
+void ulist_release(struct ulist *ulist)
 {
 	struct ulist_node *node;
 	struct ulist_node *next;
@@ -79,7 +93,7 @@ static void ulist_fini(struct ulist *ulist)
  */
 void ulist_reinit(struct ulist *ulist)
 {
-	ulist_fini(ulist);
+	ulist_release(ulist);
 	ulist_init(ulist);
 }
 
@@ -105,13 +119,13 @@ struct ulist *ulist_alloc(gfp_t gfp_mask)
  * ulist_free - free dynamically allocated ulist
  * @ulist:	ulist to free
  *
- * It is not necessary to call ulist_fini before.
+ * It is not necessary to call ulist_release before.
  */
 void ulist_free(struct ulist *ulist)
 {
 	if (!ulist)
 		return;
-	ulist_fini(ulist);
+	ulist_release(ulist);
 	kfree(ulist);
 }
 

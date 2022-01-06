@@ -8,7 +8,7 @@ if [ -z "$TOP" ]; then
 	TOP=$(readlink -f "$SCRIPT_DIR/../")
 	if [ -f "$TOP/configure.ac" ]; then
 		# inside git
-		TEST_TOP="$TOP/tests/"
+		TEST_TOP="$TOP/tests"
 		INTERNAL_BIN="$TOP"
 	else
 		# external, defaults to system binaries
@@ -54,7 +54,7 @@ run_one_test() {
 	testname="$1"
 	echo "    [TEST/fsck]   $(basename $testname)"
 	cd "$testname"
-	echo "=== Entering $testname" >> "$RESULTS"
+	echo "=== START TEST $testname" >> "$RESULTS"
 	if [ -x test.sh ]; then
 		# Type 2
 		./test.sh
@@ -64,6 +64,14 @@ run_one_test() {
 			fi
 			_fail "test failed for case $(basename $testname)"
 		fi
+		# These tests have overriden check_image() and their images may
+		# have intentional unaligned metadata to trigger subpage
+		# warnings (like fsck/018), skip the check for their subpage
+		# warnings.
+		#
+		# We care about subpage related warnings for write operations
+		# (mkfs/convert/repair), not those read-only checks on crafted
+		# images.
 	else
 		# Type 1
 		check_all_images

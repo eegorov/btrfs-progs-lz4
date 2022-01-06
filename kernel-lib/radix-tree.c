@@ -37,7 +37,7 @@
  */
 
 #include "kerncompat.h"
-#include "radix-tree.h"
+#include "kernel-lib/radix-tree.h"
 #ifdef __KERNEL__
 #define RADIX_TREE_MAP_SHIFT	(CONFIG_BASE_SMALL ? 4 : 6)
 #else
@@ -506,7 +506,7 @@ int radix_tree_tag_get(struct radix_tree_root *root,
 		offset = (index >> shift) & RADIX_TREE_MAP_MASK;
 
 		/*
-		 * This is just a debug check.  Later, we can bale as soon as
+		 * This is just a debug check.  Later, we can bail as soon as
 		 * we see an unset tag.
 		 */
 		if (!tag_get(slot, tag, offset))

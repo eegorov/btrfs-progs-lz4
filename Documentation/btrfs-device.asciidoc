@@ -29,10 +29,15 @@ removed or replaced, by commands provided by *btrfs device* and *btrfs replace*.
 The profiles can be also changed, provided there's enough workspace to do the
 conversion, using the *btrfs balance* command and namely the filter 'convert'.
 
+Type::
+The block group profile type is the main distinction of the information stored
+on the block device. User data are called 'Data', the internal data structures
+managed by filesystem are 'Metadata' and 'System'.
+
 Profile::
 A profile describes an allocation policy based on the redundancy/replication
 constraints in connection with the number of devices. The profile applies to
-data and metadata block groups separately.
+data and metadata block groups separately. Eg. 'single', 'RAID1'.
 
 RAID level::
 Where applicable, the level refers to a profile that matches constraints of the
@@ -61,8 +66,10 @@ headers.
 do not perform discard (TRIM) by default
 -f|--force::::
 force overwrite of existing filesystem on the given disk(s)
+--enqueue::::
+wait if there's another exclusive operation running, otherwise continue
 
-*remove* <device>|<devid> [<device>|<devid>...] <path>::
+*remove* [options] <device>|<devid> [<device>|<devid>...] <path>::
 Remove device(s) from a filesystem identified by <path>
 +
 Device removal must satisfy the profile constraints, otherwise the command
@@ -85,6 +92,11 @@ NOTE: In most cases, there is only one missing device in degraded mode,
 otherwise mount fails. If there are two or more devices missing (e.g. possible
 in RAID6), you need specify 'missing' as many times as the number of missing
 devices to remove all of them.
++
+`Options`
++
+--enqueue::::
+wait if there's another exclusive operation running, otherwise continue
 
 *delete* <device>|<devid> [<device>|<devid>...] <path>::
 Alias of remove kept for backward compatibility
@@ -96,7 +108,7 @@ filesystem mounting tools to wait before the mount can start. The device scan
 is only one of the preconditions and the mount can fail for other reasons.
 Normal users usually do not need this command and may safely ignore it.
 
-*scan* [(--all-devices|-d)|<device> [<device>...]]::
+*scan* [options] [<device> [<device>...]]::
 Scan devices for a btrfs filesystem and register them with the kernel module.
 This allows mounting multiple-device filesystem by specifying just one from the
 whole group.
@@ -104,13 +116,22 @@ whole group.
 If no devices are passed, all block devices that blkid reports to contain btrfs
 are scanned.
 +
-The options '--all-devices' or '-d' are deprecated and kept for backward compatibility.
-If used, behavior is the same as if no devices are passed.
+The options '--all-devices' or '-d' can be used as a fallback in case blkid is
+not available.  If used, behavior is the same as if no devices are passed.
 +
 The command can be run repeatedly. Devices that have been already registered
 remain as such. Reloading the kernel module will drop this information. There's
 an alternative way of mounting multiple-device filesystem without the need for
 prior scanning. See the mount option 'device'.
++
+`Options`
++
+-d|--all-devices::::
+Enumerate and register all devices, use as a fallback in case blkid is not
+available.
+-u|--forget::::
+Unregister a given device or all stale devices if no path is given, the device
+must be unmounted otherwise it's an error.
 
 *stats* [options] <path>|<device>::
 Read and print the device IO error statistics for all devices of the given
@@ -124,12 +145,52 @@ statistics and the meaning.
 Print the stats and reset the values to zero afterwards.
 
 -c|--check::::
-Check if the stats are all zeros and return 0 it this is so. Set bit 6 of the
+Check if the stats are all zeros and return 0 if it is so. Set bit 6 of the
 return code if any of the statistics is no-zero. The error values is 65 if
 reading stats from at least one device failed, otherwise it's 64.
 
 *usage* [options] <path> [<path>...]::
-Show detailed information about internal allocations in devices.
+Show detailed information about internal allocations on devices.
++
+The level of detail can differ if the command is run under a regular or the
+root user (due to use of restricted ioctls). The first example below is for
+normal user (warning included) and the next one with root on the same
+filesystem:
++
+-------------------------
+WARNING: cannot read detailed chunk info, per-device usage will not be shown, run as root
+/dev/sdc1, ID: 1
+   Device size:           931.51GiB
+   Device slack:              0.00B
+   Unallocated:           931.51GiB
+-------------------------
++
+-------------------------
+/dev/sdc1, ID: 1
+   Device size:           931.51GiB
+   Device slack:              0.00B
+   Data,single:           641.00GiB
+   Data,RAID0/3:            1.00GiB
+   Metadata,single:        19.00GiB
+   System,single:          32.00MiB
+   Unallocated:           271.48GiB
+-------------------------
++
+--
+* 'Device size' -- size of the device as seen by the filesystem (may be
+different than actual device size)
+* 'Device slack' -- portion of device not used by the filesystem but still
+available in the physical space provided by the device, eg. after a device shrink
+* 'Data,single', 'Metadata,single', 'System,single' -- in general, list of block
+group type (Data, Metadata, System) and profile (single, RAID1, ...) allocated
+on the device
+* 'Data,RAID0/3' -- in particular, striped profiles RAID0/RAID10/RAID5/RAID6 with
+the number of devices on which the stripes are allocated, multiple occurences
+of the same profile can appear in case a new device has been added and all new
+available stripes have been used for writes
+* 'Unallocated' -- remaining space that the filesystem can still use for new
+block groups
+--
 +
 `Options`
 +
@@ -190,7 +251,7 @@ there's enough workspace for the conversion process, we can do:
 
  $ btrfs balance start -mconvert=raid1 /mnt
 
-This operation can take a while, because al  metadata have to be moved and all
+This operation can take a while, because all metadata have to be moved and all
 block pointers updated. Depending on the physical locations of the old and new
 blocks, the disk seeking is the key factor affecting performance.
 
@@ -258,6 +319,9 @@ A block checksum mismatched or a corrupted metadata header was found.
 generation_errs::
 The block generation does not match the expected value (eg. stored in the
 parent node).
+
+Since kernel 5.14 the device stats are also available in textual form in
+'/sys/fs/btrfs/FSID/devinfo/DEVID/error_stats'.
 
 EXIT STATUS
 -----------

@@ -120,9 +120,16 @@ Tools that are still in active use without an equivalent in *btrfs*:
 
 Deprecated and obsolete tools:
 
-*btrfs-debug-tree*:: moved to *btrfs inspect-internal dump-tree*
-*btrfs-show-super*:: moved to *btrfs inspect-internal dump-super*
-*btrfs-zero-log*:: moved to *btrfs rescue zero-log*
+*btrfs-debug-tree*:: moved to *btrfs inspect-internal dump-tree*. Removed from
+source distribution.
+*btrfs-show-super*:: moved to *btrfs inspect-internal dump-super*, standalone
+removed.
+*btrfs-zero-log*:: moved to *btrfs rescue zero-log*, standalone removed.
+
+For space-constrained environments, it's possible to build a single binary with
+functionality of several standalone tools. This is following the concept of
+busybox where the file name selects the functionality. This works for symlinks
+or hardlinks. The full list can be obtained by *btrfs help --box*.
 
 EXIT STATUS
 -----------
@@ -137,6 +144,7 @@ further details.
 
 SEE ALSO
 --------
+`btrfs`(5),
 `btrfs-balance`(8),
 `btrfs-check`(8),
 `btrfs-convert`(8),

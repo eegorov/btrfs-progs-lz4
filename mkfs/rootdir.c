@@ -11,11 +11,12 @@
  * General Public License for more details.
  *
  * You should have received a copy of the GNU General Public
- * License along with this program.
+ * License along with this program; if not, write to the
+ * Free Software Foundation, Inc., 59 Temple Place - Suite 330,
+ * Boston, MA 021110-1307, USA.
  */
 
 #include "kerncompat.h"
-#include "androidcompat.h"
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -25,16 +26,17 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <ftw.h>
-#include "ctree.h"
-#include "volumes.h"
-#include "internal.h"
-#include "disk-io.h"
-#include "messages.h"
-#include "transaction.h"
-#include "utils.h"
+#include "kernel-shared/ctree.h"
+#include "kernel-shared/volumes.h"
+#include "common/internal.h"
+#include "kernel-shared/disk-io.h"
+#include "common/messages.h"
+#include "kernel-shared/transaction.h"
+#include "common/utils.h"
 #include "mkfs/rootdir.h"
 #include "mkfs/common.h"
-#include "send-utils.h"
+#include "common/send-utils.h"
+#include "common/path-utils.h"
 
 static u32 fs_block_size;
 
@@ -139,7 +141,8 @@ static int fill_inode_item(struct btrfs_trans_handle *trans,
 	}
 	if (S_ISREG(src->st_mode)) {
 		btrfs_set_stack_inode_size(dst, (u64)src->st_size);
-		if (src->st_size <= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info))
+		if (src->st_size <= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info) &&
+		    src->st_size < sectorsize)
 			btrfs_set_stack_inode_nbytes(dst, src->st_size);
 		else {
 			blocks = src->st_size / sectorsize;
@@ -155,7 +158,7 @@ static int fill_inode_item(struct btrfs_trans_handle *trans,
 	return 0;
 }
 
-static int directory_select(const struct direct *entry)
+static int directory_select(const struct dirent *entry)
 {
 	if (entry->d_name[0] == '.' &&
 		(entry->d_name[1] == 0 ||
@@ -164,7 +167,7 @@ static int directory_select(const struct direct *entry)
 	return 1;
 }
 
-static void free_namelist(struct direct **files, int count)
+static void free_namelist(struct dirent **files, int count)
 {
 	int i;
 
@@ -179,7 +182,7 @@ static void free_namelist(struct direct **files, int count)
 static u64 calculate_dir_inode_size(const char *dirname)
 {
 	int count, i;
-	struct direct **files, *cur_file;
+	struct dirent **files, *cur_file;
 	u64 dir_inode_size = 0;
 
 	count = scandir(dirname, &files, directory_select, NULL);
@@ -227,33 +230,31 @@ static int add_xattr_item(struct btrfs_trans_handle *trans,
 	int ret;
 	int cur_name_len;
 	char xattr_list[XATTR_LIST_MAX];
+	char *xattr_list_end;
 	char *cur_name;
 	char cur_value[XATTR_SIZE_MAX];
-	char delimiter = '\0';
-	char *next_location = xattr_list;
 
 	ret = llistxattr(file_name, xattr_list, XATTR_LIST_MAX);
 	if (ret < 0) {
 		if (errno == ENOTSUP)
 			return 0;
-		error("getting a list of xattr failed for %s: %s", file_name,
-				strerror(errno));
+		error("getting a list of xattr failed for %s: %m", file_name);
 		return ret;
 	}
 	if (ret == 0)
 		return ret;
 
-	cur_name = strtok(xattr_list, &delimiter);
-	while (cur_name != NULL) {
+	xattr_list_end = xattr_list + ret;
+	cur_name = xattr_list;
+	while (cur_name < xattr_list_end) {
 		cur_name_len = strlen(cur_name);
-		next_location += cur_name_len + 1;
 
-		ret = getxattr(file_name, cur_name, cur_value, XATTR_SIZE_MAX);
+		ret = lgetxattr(file_name, cur_name, cur_value, XATTR_SIZE_MAX);
 		if (ret < 0) {
 			if (errno == ENOTSUP)
 				return 0;
-			error("gettig a xattr value failed for %s attr %s: %s",
-				file_name, cur_name, strerror(errno));
+			error("getting a xattr value failed for %s attr %s: %m",
+				file_name, cur_name);
 			return ret;
 		}
 
@@ -261,11 +262,12 @@ static int add_xattr_item(struct btrfs_trans_handle *trans,
 					      cur_name_len, cur_value,
 					      ret, objectid);
 		if (ret) {
-			error("inserting a xattr item failed for %s: %s",
-					file_name, strerror(-ret));
+			errno = -ret;
+			error("inserting a xattr item failed for %s: %m",
+					file_name);
 		}
 
-		cur_name = strtok(next_location, &delimiter);
+		cur_name += cur_name_len + 1;
 	}
 
 	return ret;
@@ -280,7 +282,7 @@ static int add_symbolic_link(struct btrfs_trans_handle *trans,
 
 	ret = readlink(path_name, buf, sizeof(buf));
 	if (ret <= 0) {
-		error("readlink failed for %s: %s", path_name, strerror(errno));
+		error("readlink failed for %s: %m", path_name);
 		goto fail;
 	}
 	if (ret >= sizeof(buf)) {
@@ -319,7 +321,7 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 
 	fd = open(path_name, O_RDONLY);
 	if (fd == -1) {
-		error("cannot open %s: %s", path_name, strerror(errno));
+		error("cannot open %s: %m", path_name);
 		return ret;
 	}
 
@@ -327,7 +329,8 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 	if (st->st_size % sectorsize)
 		blocks += 1;
 
-	if (st->st_size <= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info)) {
+	if (st->st_size <= BTRFS_MAX_INLINE_DATA_SIZE(root->fs_info) &&
+	    st->st_size < sectorsize) {
 		char *buffer = malloc(st->st_size);
 
 		if (!buffer) {
@@ -337,10 +340,9 @@ static int add_file_items(struct btrfs_trans_handle *trans,
 
 		ret_read = pread64(fd, buffer, st->st_size, bytes_read);
 		if (ret_read == -1) {
-			error("cannot read %s at offset %llu length %llu: %s",
+			error("cannot read %s at offset %llu length %llu: %m",
 				path_name, (unsigned long long)bytes_read,
-				(unsigned long long)st->st_size,
-				strerror(errno));
+				(unsigned long long)st->st_size);
 			free(buffer);
 			goto end;
 		}
@@ -386,16 +388,16 @@ again:
 		ret_read = pread64(fd, eb->data, sectorsize, file_pos +
 				   bytes_read);
 		if (ret_read == -1) {
-			error("cannot read %s at offset %llu length %llu: %s",
+			error("cannot read %s at offset %llu length %llu: %m",
 				path_name,
 				(unsigned long long)file_pos + bytes_read,
-				(unsigned long long)sectorsize,
-				strerror(errno));
+				(unsigned long long)sectorsize);
 			goto end;
 		}
 
 		eb->start = first_block + bytes_read;
 		eb->len = sectorsize;
+		eb->fs_info = root->fs_info;
 
 		/*
 		 * we're doing the csum before we record the extent, but
@@ -446,10 +448,10 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 	struct btrfs_inode_item cur_inode;
 	struct btrfs_inode_item *inode_item;
 	int count, i, dir_index_cnt;
-	struct direct **files;
+	struct dirent **files;
 	struct stat st;
 	struct directory_name_entry *dir_entry, *parent_dir_entry;
-	struct direct *cur_file;
+	struct dirent *cur_file;
 	ino_t parent_inum, cur_inum;
 	ino_t highest_inum = 0;
 	const char *parent_dir_name;
@@ -465,7 +467,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 	dir_entry->dir_name = dir_name;
 	dir_entry->path = realpath(dir_name, NULL);
 	if (!dir_entry->path) {
-		error("realpath  failed for %s: %s", dir_name, strerror(errno));
+		error("realpath failed for %s: %m", dir_name);
 		ret = -1;
 		goto fail_no_dir;
 	}
@@ -504,8 +506,8 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 		parent_inum = parent_dir_entry->inum;
 		parent_dir_name = parent_dir_entry->dir_name;
 		if (chdir(parent_dir_entry->path)) {
-			error("chdir failed for %s: %s",
-				parent_dir_name, strerror(errno));
+			error("chdir failed for %s: %m",
+				parent_dir_name);
 			ret = -1;
 			goto fail_no_files;
 		}
@@ -513,8 +515,8 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 		count = scandir(parent_dir_entry->path, &files,
 				directory_select, NULL);
 		if (count == -1) {
-			error("scandir failed for %s: %s",
-				parent_dir_name, strerror(errno));
+			error("scandir failed for %s: %m",
+				parent_dir_name);
 			ret = -1;
 			goto fail;
 		}
@@ -523,8 +525,8 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 			cur_file = files[i];
 
 			if (lstat(cur_file->d_name, &st) == -1) {
-				error("lstat failed for %s: %s",
-					cur_file->d_name, strerror(errno));
+				error("lstat failed for %s: %m",
+					cur_file->d_name);
 				ret = -1;
 				goto fail;
 			}
@@ -551,6 +553,7 @@ static int traverse_directory(struct btrfs_trans_handle *trans,
 						(unsigned long)st.st_nlink);
 					goto fail;
 				}
+				ret = 0;
 				continue;
 			}
 			if (ret) {
@@ -645,7 +648,7 @@ int btrfs_mkfs_fill_dir(const char *source_dir, struct btrfs_root *root,
 
 	ret = lstat(source_dir, &root_st);
 	if (ret) {
-		error("unable to lstat %s: %s", source_dir, strerror(errno));
+		error("unable to lstat %s: %m", source_dir);
 		ret = -errno;
 		goto out;
 	}
@@ -694,7 +697,7 @@ out:
 }
 
 static int ftw_add_entry_size(const char *fpath, const struct stat *st,
-			      int type)
+			      int type, struct FTW *ftwbuf)
 {
 	/*
 	 * Failed to read the directory, mostly due to EPERM.  Abort ASAP, so
@@ -723,22 +726,26 @@ u64 btrfs_mkfs_size_dir(const char *dir_name, u32 sectorsize, u64 min_dev_size,
 	u64 meta_threshold = SZ_8M;
 	u64 data_threshold = SZ_8M;
 
-	float data_multipler = 1;
-	float meta_multipler = 1;
+	float data_multiplier = 1;
+	float meta_multiplier = 1;
 
 	fs_block_size = sectorsize;
 	ftw_data_size = 0;
 	ftw_meta_nr_inode = 0;
-	ret = ftw(dir_name, ftw_add_entry_size, 10);
+
+	/*
+	 * Symbolic link is not followed when creating files, so no need to
+	 * follow them here.
+	 */
+	ret = nftw(dir_name, ftw_add_entry_size, 10, FTW_PHYS);
 	if (ret < 0) {
-		error("ftw subdir walk of %s failed: %s", dir_name,
-			strerror(errno));
+		error("ftw subdir walk of %s failed: %m", dir_name);
 		exit(1);
 	}
 
 
 	/*
-	 * Maximum metadata useage for every inode, which will be PATH_MAX
+	 * Maximum metadata usage for every inode, which will be PATH_MAX
 	 * for the following items:
 	 * 1) DIR_ITEM
 	 * 2) DIR_INDEX
@@ -758,11 +765,11 @@ u64 btrfs_mkfs_size_dir(const char *dir_name, u32 sectorsize, u64 min_dev_size,
 	/* Minimal chunk size from btrfs_alloc_chunk(). */
 	if (meta_profile & BTRFS_BLOCK_GROUP_DUP) {
 		meta_threshold = SZ_32M;
-		meta_multipler = 2;
+		meta_multiplier = 2;
 	}
 	if (data_profile & BTRFS_BLOCK_GROUP_DUP) {
 		data_threshold = SZ_64M;
-		data_multipler = 2;
+		data_multiplier = 2;
 	}
 
 	/*
@@ -772,10 +779,10 @@ u64 btrfs_mkfs_size_dir(const char *dir_name, u32 sectorsize, u64 min_dev_size,
 	 */
 	if (meta_size > meta_threshold)
 		meta_chunk_size = (round_up(meta_size, meta_threshold) -
-				   meta_threshold) * meta_multipler;
+				   meta_threshold) * meta_multiplier;
 	if (ftw_data_size > data_threshold)
 		data_chunk_size = (round_up(ftw_data_size, data_threshold) -
-				   data_threshold) * data_multipler;
+				   data_threshold) * data_multiplier;
 
 	total_size = data_chunk_size + meta_chunk_size + min_dev_size;
 	return total_size;
@@ -783,7 +790,7 @@ u64 btrfs_mkfs_size_dir(const char *dir_name, u32 sectorsize, u64 min_dev_size,
 
 /*
  * Get the end position of the last device extent for given @devid;
- * @size_ret is exclsuive (means it should be aligned to sectorsize)
+ * @size_ret is exclusive (means it should be aligned to sectorsize)
  */
 static int get_device_extent_end(struct btrfs_fs_info *fs_info,
 				 u64 devid, u64 *size_ret)
@@ -844,7 +851,7 @@ static int set_device_size(struct btrfs_fs_info *fs_info,
 	int ret;
 
 	/*
-	 * Update in-meory device->total_bytes, so that at trans commit time,
+	 * Update in-memory device->total_bytes, so that at trans commit time,
 	 * super->dev_item will also get updated
 	 */
 	device->total_bytes = new_size;
@@ -854,8 +861,8 @@ static int set_device_size(struct btrfs_fs_info *fs_info,
 	trans = btrfs_start_transaction(chunk_root, 1);
 	if (IS_ERR(trans)) {
 		ret = PTR_ERR(trans);
-		error("failed to start transaction: %d (%s)", ret,
-			strerror(-ret));
+		errno = -ret;
+		error("failed to start transaction: %d (%m)", ret);
 		return ret;
 	}
 	key.objectid = BTRFS_DEV_ITEMS_OBJECTID;
@@ -883,9 +890,10 @@ static int set_device_size(struct btrfs_fs_info *fs_info,
 	 * super->dev_item
 	 */
 	ret = btrfs_commit_transaction(trans, chunk_root);
-	if (ret < 0)
-		error("failed to commit current transaction: %d (%s)",
-			ret, strerror(-ret));
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to commit current transaction: %d (%m)", ret);
+	}
 	btrfs_release_path(&path);
 	return ret;
 
@@ -920,8 +928,8 @@ int btrfs_mkfs_shrink_fs(struct btrfs_fs_info *fs_info, u64 *new_size_ret,
 
 	ret = get_device_extent_end(fs_info, 1, &new_size);
 	if (ret < 0) {
-		error("failed to get minimal device size: %d (%s)",
-			ret, strerror(-ret));
+		errno = -ret;
+		error("failed to get minimal device size: %d (%m)", ret);
 		return ret;
 	}
 
@@ -938,16 +946,15 @@ int btrfs_mkfs_shrink_fs(struct btrfs_fs_info *fs_info, u64 *new_size_ret,
 	if (shrink_file_size) {
 		ret = fstat64(device->fd, &file_stat);
 		if (ret < 0) {
-			error("failed to stat devid %llu: %s", device->devid,
-				strerror(errno));
+			error("failed to stat devid %llu: %m", device->devid);
 			return ret;
 		}
 		if (!S_ISREG(file_stat.st_mode))
 			return ret;
 		ret = ftruncate64(device->fd, new_size);
 		if (ret < 0) {
-			error("failed to truncate device file of devid %llu: %s",
-				device->devid, strerror(errno));
+			error("failed to truncate device file of devid %llu: %m",
+				device->devid);
 			return ret;
 		}
 	}

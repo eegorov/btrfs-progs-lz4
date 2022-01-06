@@ -15,21 +15,21 @@ prepare_test_dev
 
 do_one_test ()
 {
-	run_check "$TOP/mkfs.btrfs" -f "$@" "$TEST_DEV"
+	run_check_mkfs_test_dev "$@"
 
 	# Use dev-extent tree to find first device extent
 	first_dev_extent=$(run_check_stdout "$TOP/btrfs" inspect-internal \
 		dump-tree -t device "$TEST_DEV" | \
 		grep -oP '(?<=DEV_EXTENT )[[:digit:]]*' | head -n1)
 
-	if [ -z $first_dev_extent ]; then
+	if [ -z "$first_dev_extent" ]; then
 		_fail "failed to get first device extent"
 	fi
 
-	echo "first dev extent starts at $first_dev_extent" >> "$RESULTS"
-	echo "reserved range is [0, $(( 1024 * 1024)))" >> "$RESULTS"
+	_log "first dev extent starts at $first_dev_extent"
+	_log "reserved range is [0, $(( 1024 * 1024)))"
 	# First device extent should not start below 1M
-	if [ $first_dev_extent -lt $(( 1024 * 1024 )) ]; then
+	if [ "$first_dev_extent" -lt $(( 1024 * 1024 )) ]; then
 		_fail "first device extent occupies reserved 0~1M range"
 	fi
 }

@@ -9,11 +9,11 @@ if [ -z "$TOP" ]; then
 	TOP=$(readlink -f "$SCRIPT_DIR/../")
 	if [ -f "$TOP/configure.ac" ]; then
 		# inside git
-		TEST_TOP="$TOP/tests/"
+		TEST_TOP="$TOP/tests"
 		INTERNAL_BIN="$TOP"
 	else
 		# external, defaults to system binaries
-		TOP=$(dirname `which btrfs`)
+		TOP=$(dirname `type -p btrfs`)
 		TEST_TOP="$SCRIPT_DIR"
 		INTERNAL_BIN="$TEST_TOP"
 	fi
@@ -58,7 +58,7 @@ run_one_test() {
 	testname=$(basename "$testdir")
 	echo "    [TEST/conv]   $testname"
 	cd "$testdir"
-	echo "=== Entering $testname" >> "$RESULTS"
+	echo "=== START TEST $testname" >> "$RESULTS"
 	if [ -x test.sh ]; then
 		# Only support custom test scripts
 		./test.sh
@@ -70,6 +70,7 @@ run_one_test() {
 			fi
 			_fail "test failed for case $testname"
 		fi
+		check_test_results "$RESULTS" "$testname"
 	else
 		_fail "custom test script not found"
 	fi

@@ -13,12 +13,10 @@ test_mkfs_with_size() {
 	local tmp
 
 	size="$1"
-	run_check truncate -s$size $TEST_DEV
-	imgsize=$(run_check_stdout stat --format=%s $TEST_DEV)
-	run_check $SUDO_HELPER $TOP/mkfs.btrfs -f \
-		--rootdir $INTERNAL_BIN/Documentation \
-		$TEST_DEV
-	tmp=$(run_check_stdout stat --format=%s $TEST_DEV)
+	run_check truncate -s"$size" "$TEST_DEV"
+	imgsize=$(run_check_stdout stat --format=%s "$TEST_DEV")
+	run_check_mkfs_test_dev --rootdir "$INTERNAL_BIN/Documentation"
+	tmp=$(run_check_stdout stat --format=%s "$TEST_DEV")
 	if ! [ "$imgsize" = "$tmp" ]; then
 		_fail "image size changed from $imgsize to $tmp"
 	fi

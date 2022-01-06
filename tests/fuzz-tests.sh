@@ -8,11 +8,11 @@ if [ -z "$TOP" ]; then
 	TOP=$(readlink -f "$SCRIPT_DIR/../")
 	if [ -f "$TOP/configure.ac" ]; then
 		# inside git
-		TEST_TOP="$TOP/tests/"
+		TEST_TOP="$TOP/tests"
 		INTERNAL_BIN="$TOP"
 	else
 		# external, defaults to system binaries
-		TOP=$(dirname `which btrfs`)
+		TOP=$(dirname `type -p btrfs`)
 		TEST_TOP="$SCRIPT_DIR"
 		INTERNAL_BIN="$TEST_TOP"
 	fi
@@ -51,7 +51,7 @@ do
 	name=$(basename "$i")
 	cd $i
 	if [ -x test.sh ]; then
-		echo "=== Entering $i" >> "$RESULTS"
+		echo "=== START TEST $i" >> "$RESULTS"
 		echo "    [TEST/fuzz]   $name"
 		./test.sh
 		if [ $? -ne 0 ]; then

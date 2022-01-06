@@ -20,7 +20,7 @@ rm -rf "$srcdir"
 mkdir -p "$srcdir"
 run_check chmod a+rw "$srcdir"
 
-run_check "$TOP/mkfs.btrfs" -f "$TEST_DEV"
+run_check_mkfs_test_dev
 run_check_mount_test_dev
 
 BLOCK_SIZE=$(stat -f -c %S "$TEST_MNT")
@@ -31,9 +31,9 @@ run_check $SUDO_HELPER "$TOP/btrfs" subvolume create "$TEST_MNT/baz"
 run_check $SUDO_HELPER "$TOP/btrfs" subvolume create "$TEST_MNT/snap"
 
 tr '\000' 'A' < /dev/null |
-	run_check $SUDO_HELPER dd of=$TEST_MNT/foo/file_a bs=$BLOCK_SIZE count=32
+	run_check $SUDO_HELPER dd of="$TEST_MNT/foo/file_a" bs="$BLOCK_SIZE" count=32
 tr '\000' 'B' < /dev/null |
-	run_check $SUDO_HELPER dd of=$TEST_MNT/bar/file_b bs=$BLOCK_SIZE count=32
+	run_check $SUDO_HELPER dd of="$TEST_MNT/bar/file_b" bs="$BLOCK_SIZE" count=32
 
 run_check $SUDO_HELPER cp --reflink=always "$TEST_MNT/foo/file_a" "$TEST_MNT/baz/file_a"
 run_check $SUDO_HELPER cp --reflink=always "$TEST_MNT/bar/file_b" "$TEST_MNT/baz/file_b"
@@ -100,7 +100,7 @@ run_check $FSSUM_PROG -A -f -w "$srcdir/bar.0.fssum" "$TEST_MNT/snap/bar.0"
 run_check $FSSUM_PROG -A -f -w "$srcdir/baz.0.fssum" "$TEST_MNT/snap/baz.0"
 
 run_check_umount_test_dev
-run_check "$TOP/mkfs.btrfs" -f "$TEST_DEV"
+run_check_mkfs_test_dev
 run_check_mount_test_dev
 run_check $SUDO_HELPER "$TOP/btrfs" subvolume create "$TEST_MNT/dest"
 run_check_umount_test_dev
