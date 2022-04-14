@@ -157,7 +157,7 @@ usage [options] <path> [<path>...]::
           RAID1, ...) allocated on the device
         * *Data,RAID0/3* -- in particular, striped profiles
           RAID0/RAID10/RAID5/RAID6 with the number of devices on which the
-          stripes are allocated, multiple occurences of the same profile can
+          stripes are allocated, multiple occurrences of the same profile can
           appear in case a new device has been added and all new available
           stripes have been used for writes
         * *Unallocated* -- remaining space that the filesystem can still use
@@ -229,7 +229,7 @@ EXIT STATUS
 **btrfs device** returns a zero exit status if it succeeds. Non zero is
 returned in case of failure.
 
-If the *-s* option is used, *btrfs device stats* will add 64 to the
+If the *-c* option is used, *btrfs device stats* will add 64 to the
 exit status if any of the error counters is non-zero.
 
 AVAILABILITY

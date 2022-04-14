@@ -9,6 +9,7 @@ Welcome to BTRFS documentation!
 
    Introduction
    man-index
+   Administration
 
 .. toctree::
    :maxdepth: 1
@@ -31,6 +32,7 @@ Welcome to BTRFS documentation!
    Seeding-device
    Send-receive
    Subvolumes
+   Swapfile
    Tree-checker
    Trim
    Volume-management

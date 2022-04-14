@@ -25,7 +25,7 @@ LZO
         * good backward compatibility
 ZSTD
         * compression comparable to zlib with higher compression/decompression speeds and different ratio
-        * levels: 1 to 15
+        * levels: 1 to 15, mapped directly (higher levels are not available)
         * since 4.14, levels since 5.1
 
 The differences depend on the actual data set and cannot be expressed by a
@@ -48,7 +48,7 @@ This will enable the ``zstd`` algorithm on the default level (which is 3).
 The level can be specified manually too like ``zstd:3``. Higher levels compress
 better at the cost of time. This in turn may cause increased write latency, low
 levels are suitable for real-time compression and on reasonably fast CPU don't
-cause performance drops.
+cause noticeable performance drops.
 
 .. code-block:: shell
 
@@ -145,9 +145,11 @@ Compatibility
 
 Compression is done using the COW mechanism so it's incompatible with
 *nodatacow*. Direct IO works on compressed files but will fall back to buffered
-writes and leads to recompression. Currently 'nodatasum' and compression don't
+writes and leads to recompression. Currently *nodatasum* and compression don't
 work together.
 
 The compression algorithms have been added over time so the version
 compatibility should be also considered, together with other tools that may
 access the compressed data like bootloaders.
+
+

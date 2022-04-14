@@ -22,6 +22,7 @@
 #include "common/utils.h"
 #include "kernel-shared/disk-io.h"
 #include "kernel-shared/volumes.h"
+#include "kernel-shared/backref.h"
 #include "common/repair.h"
 #include "check/mode-common.h"
 
@@ -204,7 +205,7 @@ int check_prealloc_extent_written(u64 disk_bytenr, u64 num_bytes)
 	/* First check all inline refs. */
 	ei = btrfs_item_ptr(path.nodes[0], path.slots[0],
 			    struct btrfs_extent_item);
-	item_size = btrfs_item_size_nr(path.nodes[0], path.slots[0]);
+	item_size = btrfs_item_size(path.nodes[0], path.slots[0]);
 	ptr = (unsigned long)(ei + 1);
 	end = (unsigned long)ei + item_size;
 	while (ptr < end) {
@@ -339,7 +340,7 @@ int count_csum_range(u64 start, u64 len, u64 *found)
 		if (key.offset > start)
 			start = key.offset;
 
-		size = btrfs_item_size_nr(leaf, path.slots[0]);
+		size = btrfs_item_size(leaf, path.slots[0]);
 		csum_end = key.offset + (size / csum_size) *
 			   gfs_info->sectorsize;
 		if (csum_end > start) {
@@ -757,7 +758,7 @@ static int find_file_type_dir_index(struct btrfs_root *root, u64 ino, u64 dirid,
 	if (filetype >= BTRFS_FT_MAX || filetype == BTRFS_FT_UNKNOWN)
 		goto out;
 	len = min_t(u32, BTRFS_NAME_LEN,
-		btrfs_item_size_nr(path.nodes[0], path.slots[0]) - sizeof(*di));
+		btrfs_item_size(path.nodes[0], path.slots[0]) - sizeof(*di));
 	len = min_t(u32, len, btrfs_dir_name_len(path.nodes[0], di));
 	read_extent_buffer(path.nodes[0], namebuf, (unsigned long)(di + 1), len);
 	if (name_len != len || memcmp(namebuf, name, len))
@@ -801,7 +802,7 @@ static int find_file_type_dir_item(struct btrfs_root *root, u64 ino, u64 dirid,
 		goto out;
 
 	cur = btrfs_item_ptr_offset(path.nodes[0], path.slots[0]);
-	end = cur + btrfs_item_size_nr(path.nodes[0], path.slots[0]);
+	end = cur + btrfs_item_size(path.nodes[0], path.slots[0]);
 	while (cur < end) {
 		di = (struct btrfs_dir_item *)cur;
 		cur += btrfs_dir_name_len(path.nodes[0], di) + sizeof(*di);
@@ -816,7 +817,7 @@ static int find_file_type_dir_item(struct btrfs_root *root, u64 ino, u64 dirid,
 		if (filetype >= BTRFS_FT_MAX || filetype == BTRFS_FT_UNKNOWN)
 			continue;
 		len = min_t(u32, BTRFS_NAME_LEN,
-			    btrfs_item_size_nr(path.nodes[0], path.slots[0]) -
+			    btrfs_item_size(path.nodes[0], path.slots[0]) -
 			    sizeof(*di));
 		len = min_t(u32, len, btrfs_dir_name_len(path.nodes[0], di));
 		read_extent_buffer(path.nodes[0], namebuf,
@@ -902,7 +903,7 @@ int detect_imode(struct btrfs_root *root, struct btrfs_path *path,
 		case BTRFS_INODE_REF_KEY:
 			/* The most accurate way to determine filetype */
 			cur = btrfs_item_ptr_offset(leaf, slot);
-			end = cur + btrfs_item_size_nr(leaf, slot);
+			end = cur + btrfs_item_size(leaf, slot);
 			while (cur < end) {
 				iref = (struct btrfs_inode_ref *)cur;
 				namelen = min_t(u32, end - cur - sizeof(&iref),
@@ -1190,4 +1191,484 @@ int repair_dev_item_bytes_used(struct btrfs_fs_info *fs_info,
 error:
 	btrfs_abort_transaction(trans, ret);
 	return ret;
+}
+
+static int populate_csum(struct btrfs_trans_handle *trans,
+			 struct btrfs_root *csum_root, char *buf, u64 start,
+			 u64 len)
+{
+	u64 offset = 0;
+	u64 sectorsize;
+	int ret = 0;
+
+	while (offset < len) {
+		sectorsize = gfs_info->sectorsize;
+		ret = read_data_from_disk(gfs_info, buf, start + offset,
+					  &sectorsize, 0);
+		if (ret)
+			break;
+		ret = btrfs_csum_file_block(trans, start + len, start + offset,
+					    buf, sectorsize);
+		if (ret)
+			break;
+		offset += sectorsize;
+	}
+	return ret;
+}
+
+static int fill_csum_tree_from_one_fs_root(struct btrfs_trans_handle *trans,
+					   struct btrfs_root *cur_root)
+{
+	struct btrfs_root *csum_root;
+	struct btrfs_path path;
+	struct btrfs_key key;
+	struct extent_buffer *node;
+	struct btrfs_file_extent_item *fi;
+	char *buf = NULL;
+	u64 skip_ino = 0;
+	u64 start = 0;
+	u64 len = 0;
+	int slot = 0;
+	int ret = 0;
+
+	buf = malloc(gfs_info->sectorsize);
+	if (!buf)
+		return -ENOMEM;
+
+	btrfs_init_path(&path);
+	key.objectid = 0;
+	key.offset = 0;
+	key.type = 0;
+	ret = btrfs_search_slot(NULL, cur_root, &key, &path, 0, 0);
+	if (ret < 0)
+		goto out;
+	/* Iterate all regular file extents and fill its csum */
+	while (1) {
+		u8 type;
+
+		btrfs_item_key_to_cpu(path.nodes[0], &key, path.slots[0]);
+
+		if (key.type != BTRFS_EXTENT_DATA_KEY &&
+		    key.type != BTRFS_INODE_ITEM_KEY)
+			goto next;
+
+		/* This item belongs to an inode with NODATASUM, skip it */
+		if (key.objectid == skip_ino)
+			goto next;
+
+		if (key.type == BTRFS_INODE_ITEM_KEY) {
+			struct btrfs_inode_item *ii;
+
+			ii = btrfs_item_ptr(path.nodes[0], path.slots[0],
+					    struct btrfs_inode_item);
+			/* Check if the inode has NODATASUM flag */
+			if (btrfs_inode_flags(path.nodes[0], ii) & BTRFS_INODE_NODATASUM)
+				skip_ino = key.objectid;
+			goto next;
+		}
+		node = path.nodes[0];
+		slot = path.slots[0];
+		fi = btrfs_item_ptr(node, slot, struct btrfs_file_extent_item);
+		type = btrfs_file_extent_type(node, fi);
+
+		/* Skip inline extents */
+		if (type == BTRFS_FILE_EXTENT_INLINE)
+			goto next;
+
+		start = btrfs_file_extent_disk_bytenr(node, fi);
+		/* Skip holes */
+		if (start == 0)
+			goto next;
+		/*
+		 * Always generate the csum for the whole preallocated/regular
+		 * first, then remove the csum for preallocated range.
+		 *
+		 * This is to handle holes on regular extents like:
+		 * xfs_io -f -c "pwrite 0 8k" -c "sync" -c "punch 0 4k".
+		 *
+		 * This behavior will cost extra IO/CPU time, but there is
+		 * not other way to ensure the correctness.
+		 */
+		csum_root = btrfs_csum_root(gfs_info, start);
+		len = btrfs_file_extent_disk_num_bytes(node, fi);
+		ret = populate_csum(trans, csum_root, buf, start, len);
+		if (ret == -EEXIST)
+			ret = 0;
+		if (ret < 0)
+			goto out;
+
+		/* Delete the csum for the preallocated range */
+		if (type == BTRFS_FILE_EXTENT_PREALLOC) {
+			start += btrfs_file_extent_offset(node, fi);
+			len = btrfs_file_extent_num_bytes(node, fi);
+			ret = btrfs_del_csums(trans, start, len);
+			if (ret < 0)
+				goto out;
+		}
+next:
+		/*
+		 * TODO: if next leaf is corrupted, jump to nearest next valid
+		 * leaf.
+		 */
+		ret = btrfs_next_item(cur_root, &path);
+		if (ret < 0)
+			goto out;
+		if (ret > 0) {
+			ret = 0;
+			goto out;
+		}
+	}
+
+out:
+	btrfs_release_path(&path);
+	free(buf);
+	return ret;
+}
+
+static int fill_csum_tree_from_fs(struct btrfs_trans_handle *trans)
+{
+	struct btrfs_path path;
+	struct btrfs_root *tree_root = gfs_info->tree_root;
+	struct btrfs_root *cur_root;
+	struct extent_buffer *node;
+	struct btrfs_key key;
+	int slot = 0;
+	int ret = 0;
+
+	btrfs_init_path(&path);
+	key.objectid = BTRFS_FS_TREE_OBJECTID;
+	key.offset = 0;
+	key.type = BTRFS_ROOT_ITEM_KEY;
+	ret = btrfs_search_slot(NULL, tree_root, &key, &path, 0, 0);
+	if (ret < 0)
+		goto out;
+	if (ret > 0) {
+		ret = -ENOENT;
+		goto out;
+	}
+
+	while (1) {
+		node = path.nodes[0];
+		slot = path.slots[0];
+		btrfs_item_key_to_cpu(node, &key, slot);
+		if (key.objectid > BTRFS_LAST_FREE_OBJECTID)
+			goto out;
+		if (key.type != BTRFS_ROOT_ITEM_KEY)
+			goto next;
+		if (!is_fstree(key.objectid))
+			goto next;
+		key.offset = (u64)-1;
+
+		cur_root = btrfs_read_fs_root(gfs_info, &key);
+		if (IS_ERR(cur_root) || !cur_root) {
+			fprintf(stderr, "Fail to read fs/subvol tree: %lld\n",
+				key.objectid);
+			goto out;
+		}
+		ret = fill_csum_tree_from_one_fs_root(trans, cur_root);
+		if (ret < 0)
+			goto out;
+next:
+		ret = btrfs_next_item(tree_root, &path);
+		if (ret > 0) {
+			ret = 0;
+			goto out;
+		}
+		if (ret < 0)
+			goto out;
+	}
+
+out:
+	btrfs_release_path(&path);
+	return ret;
+}
+
+static int remove_csum_for_file_extent(u64 ino, u64 offset, u64 rootid, void *ctx)
+{
+	struct btrfs_trans_handle *trans = (struct btrfs_trans_handle *)ctx;
+	struct btrfs_fs_info *fs_info = trans->fs_info;
+	struct btrfs_file_extent_item *fi;
+	struct btrfs_inode_item *ii;
+	struct btrfs_path path = {};
+	struct btrfs_key key;
+	struct btrfs_root *root;
+	bool nocsum = false;
+	u8 type;
+	u64 disk_bytenr;
+	u64 disk_len;
+	int ret = 0;
+
+	key.objectid = rootid;
+	key.type = BTRFS_ROOT_ITEM_KEY;
+	key.offset = (u64)-1;
+	root = btrfs_read_fs_root(fs_info, &key);
+	if (IS_ERR(root)) {
+		ret = PTR_ERR(root);
+		goto out;
+	}
+
+	/* Check if the inode has NODATASUM flag */
+	key.objectid = ino;
+	key.type = BTRFS_INODE_ITEM_KEY;
+	key.offset = 0;
+	ret = btrfs_search_slot(NULL, root, &key, &path, 0, 0);
+	if (ret > 0)
+		ret = -ENOENT;
+	if (ret < 0)
+		goto out;
+
+	ii = btrfs_item_ptr(path.nodes[0], path.slots[0],
+			    struct btrfs_inode_item);
+	if (btrfs_inode_flags(path.nodes[0], ii) & BTRFS_INODE_NODATASUM)
+		nocsum = true;
+
+	btrfs_release_path(&path);
+
+	/* Check the file extent item and delete csum if needed */
+	key.objectid = ino;
+	key.type = BTRFS_EXTENT_DATA_KEY;
+	key.offset = offset;
+	ret = btrfs_search_slot(NULL, root, &key, &path, 0, 0);
+	if (ret > 0)
+		ret = -ENOENT;
+	if (ret < 0)
+		goto out;
+	fi = btrfs_item_ptr(path.nodes[0], path.slots[0],
+			    struct btrfs_file_extent_item);
+	type = btrfs_file_extent_type(path.nodes[0], fi);
+
+	if (btrfs_file_extent_disk_bytenr(path.nodes[0], fi) == 0)
+		goto out;
+
+	/* Compressed extent should have csum, skip it */
+	if (btrfs_file_extent_compression(path.nodes[0], fi) !=
+	    BTRFS_COMPRESS_NONE)
+		goto out;
+	/*
+	 * We only want to delete the csum range if the inode has NODATASUM
+	 * flag or it's a preallocated extent.
+	 */
+	if (!(nocsum || type == BTRFS_FILE_EXTENT_PREALLOC))
+		goto out;
+
+	/* If NODATASUM, we need to remove all csum for the extent */
+	if (nocsum) {
+		disk_bytenr = btrfs_file_extent_disk_bytenr(path.nodes[0], fi);
+		disk_len = btrfs_file_extent_disk_num_bytes(path.nodes[0], fi);
+	} else {
+		disk_bytenr = btrfs_file_extent_disk_bytenr(path.nodes[0], fi) +
+			      btrfs_file_extent_offset(path.nodes[0], fi);
+		disk_len = btrfs_file_extent_num_bytes(path.nodes[0], fi);
+	}
+	btrfs_release_path(&path);
+
+	/* Now delete the csum for the preallocated or nodatasum range */
+	ret = btrfs_del_csums(trans, disk_bytenr, disk_len);
+out:
+	btrfs_release_path(&path);
+	return ret;
+}
+
+static int fill_csum_tree_from_extent(struct btrfs_trans_handle *trans,
+				      struct btrfs_root *extent_root)
+{
+	struct btrfs_root *csum_root;
+	struct btrfs_path path;
+	struct btrfs_extent_item *ei;
+	struct extent_buffer *leaf;
+	char *buf;
+	struct btrfs_key key;
+	int ret;
+
+	btrfs_init_path(&path);
+	key.objectid = 0;
+	key.type = BTRFS_EXTENT_ITEM_KEY;
+	key.offset = 0;
+	ret = btrfs_search_slot(NULL, extent_root, &key, &path, 0, 0);
+	if (ret < 0) {
+		btrfs_release_path(&path);
+		return ret;
+	}
+
+	buf = malloc(gfs_info->sectorsize);
+	if (!buf) {
+		btrfs_release_path(&path);
+		return -ENOMEM;
+	}
+
+	while (1) {
+		if (path.slots[0] >= btrfs_header_nritems(path.nodes[0])) {
+			ret = btrfs_next_leaf(extent_root, &path);
+			if (ret < 0)
+				break;
+			if (ret) {
+				ret = 0;
+				break;
+			}
+		}
+		leaf = path.nodes[0];
+
+		btrfs_item_key_to_cpu(leaf, &key, path.slots[0]);
+		if (key.type != BTRFS_EXTENT_ITEM_KEY) {
+			path.slots[0]++;
+			continue;
+		}
+
+		ei = btrfs_item_ptr(leaf, path.slots[0],
+				    struct btrfs_extent_item);
+		if (!(btrfs_extent_flags(leaf, ei) &
+		      BTRFS_EXTENT_FLAG_DATA)) {
+			path.slots[0]++;
+			continue;
+		}
+		/*
+		 * Generate the datasum unconditionally first.
+		 *
+		 * This will generate csum for preallocated extents, but that
+		 * will be later deleted.
+		 *
+		 * This is to address cases like this:
+		 *  fallocate 0 8K
+		 *  pwrite 0 4k
+		 *  sync
+		 *  punch 0 4k
+		 *
+		 * Above case we will have csum for [0, 4K) and that's valid.
+		 */
+		csum_root = btrfs_csum_root(gfs_info, key.objectid);
+		ret = populate_csum(trans, csum_root, buf, key.objectid,
+				    key.offset);
+		if (ret < 0)
+			break;
+		ret = iterate_extent_inodes(trans->fs_info, key.objectid, 0, 0,
+					    remove_csum_for_file_extent, trans);
+		if (ret)
+			break;
+		path.slots[0]++;
+	}
+
+	btrfs_release_path(&path);
+	free(buf);
+	return ret;
+}
+
+/*
+ * Recalculate the csum and put it into the csum tree.
+ *
+ * @search_fs_tree:	How to get the data extent item.
+ *			If true, iterate all fs roots to get all
+ *			extent data (which can be slow).
+ *			Otherwise, search extent tree for extent data.
+ */
+int fill_csum_tree(struct btrfs_trans_handle *trans, bool search_fs_tree)
+{
+	struct btrfs_root *root;
+	struct rb_node *n;
+	int ret;
+
+	if (search_fs_tree)
+		return fill_csum_tree_from_fs(trans);
+
+	root = btrfs_extent_root(gfs_info, 0);
+	while (1) {
+		ret = fill_csum_tree_from_extent(trans, root);
+		if (ret)
+			break;
+		n = rb_next(&root->rb_node);
+		if (!n)
+			break;
+		root = rb_entry(n, struct btrfs_root, rb_node);
+		if (root->root_key.objectid != BTRFS_EXTENT_TREE_OBJECTID)
+			break;
+	}
+	return ret;
+}
+
+static int get_num_devs_in_chunk_tree(struct btrfs_fs_info *fs_info)
+{
+	struct btrfs_root *chunk_root = fs_info->chunk_root;
+	struct btrfs_path path = { 0 };
+	struct btrfs_key key = { 0 };
+	int found_devs = 0;
+	int ret;
+
+	ret = btrfs_search_slot(NULL, chunk_root, &key, &path, 0, 0);
+	if (ret < 0)
+		return ret;
+
+	/* We should be the first slot, and chunk tree should not be empty*/
+	ASSERT(path.slots[0] == 0 && btrfs_header_nritems(path.nodes[0]));
+
+	btrfs_item_key_to_cpu(path.nodes[0], &key, path.slots[0]);
+
+	while (key.objectid == BTRFS_DEV_ITEMS_OBJECTID &&
+	       key.type == BTRFS_DEV_ITEM_KEY) {
+		found_devs++;
+
+		ret = btrfs_next_item(chunk_root, &path);
+		if (ret < 0)
+			break;
+
+		/*
+		 * This should not happen, as we should have CHUNK items after
+		 * DEV items, but since we're only to get the num devices, no
+		 * need to bother that problem.
+		 */
+		if (ret > 0) {
+			ret = 0;
+			break;
+		}
+		btrfs_item_key_to_cpu(path.nodes[0], &key, path.slots[0]);
+	}
+	btrfs_release_path(&path);
+	if (ret < 0)
+		return ret;
+	return found_devs;
+}
+
+int check_and_repair_super_num_devs(struct btrfs_fs_info *fs_info)
+{
+	struct btrfs_trans_handle *trans;
+	int found_devs;
+	int ret;
+
+	ret = get_num_devs_in_chunk_tree(fs_info);
+	if (ret < 0)
+		return ret;
+
+	found_devs = ret;
+
+	if (found_devs == btrfs_super_num_devices(fs_info->super_copy))
+		return 0;
+
+	/* Now the found devs in chunk tree mismatch with super block */
+	error("super num devices mismatch, have %llu expect %u",
+	      btrfs_super_num_devices(fs_info->super_copy),
+	      found_devs);
+
+	if (!repair)
+		return -EUCLEAN;
+
+	/*
+	 * Repair is pretty simple, just reset the super block value and
+	 * commit a new transaction.
+	 */
+	trans = btrfs_start_transaction(fs_info->tree_root, 0);
+	if (IS_ERR(trans)) {
+		ret = PTR_ERR(trans);
+		errno = -ret;
+		error("failed to start trans: %m");
+		return ret;
+	}
+
+	btrfs_set_super_num_devices(fs_info->super_copy, found_devs);
+	ret = btrfs_commit_transaction(trans, fs_info->tree_root);
+	if (ret < 0) {
+		errno = -ret;
+		error("failed to commit trans: %m");
+		btrfs_abort_transaction(trans, ret);
+		return ret;
+	}
+	printf("Successfully reset super num devices to %u\n", found_devs);
+	return 0;
 }

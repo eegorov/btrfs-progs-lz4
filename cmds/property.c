@@ -190,8 +190,6 @@ static int prop_compression(enum prop_object_type type,
 	xattr_name[XATTR_BTRFS_PREFIX_LEN + strlen(name)] = '\0';
 
 	if (value) {
-		if (strcmp(value, "no") == 0 || strcmp(value, "none") == 0)
-			value = "";
 		sret = fsetxattr(fd, xattr_name, value, strlen(value), 0);
 	} else {
 		sret = fgetxattr(fd, xattr_name, NULL, 0);
@@ -373,7 +371,7 @@ static int autodetect_object_types(const char *object, int *types_out)
 
 	is_btrfs_object = check_btrfs_object(object);
 
-	ret = lstat(object, &st);
+	ret = stat(object, &st);
 	if (ret < 0) {
 		ret = -errno;
 		goto out;
