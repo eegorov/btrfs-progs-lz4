@@ -212,10 +212,9 @@ libbtrfs_objects = \
 		libbtrfs/send-utils.o	\
 		crypto/crc32c.o
 
-libbtrfs_headers = libbtrfs/send-stream.h libbtrfs/send-utils.h kernel-shared/send.h kernel-lib/rbtree.h \
-	       kernel-lib/list.h kerncompat.h \
-	       common/extent-cache.h kernel-shared/extent_io.h ioctl.h \
-	       kernel-shared/ctree.h version.h
+libbtrfs_headers = libbtrfs/send-stream.h libbtrfs/send-utils.h libbtrfs/send.h kernel-lib/rbtree.h \
+	       kernel-lib/list.h kernel-lib/rbtree_types.h kerncompat.h \
+	       ioctl.h libbtrfs/ctree.h version.h
 libbtrfsutil_major := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MAJOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
 libbtrfsutil_minor := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_MINOR ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
 libbtrfsutil_patch := $(shell sed -rn 's/^\#define BTRFS_UTIL_VERSION_PATCH ([0-9])+$$/\1/p' libbtrfsutil/btrfsutil.h)
@@ -335,7 +334,7 @@ endif
 btrfs_convert_cflags = -DBTRFSCONVERT_EXT2=$(BTRFSCONVERT_EXT2)
 btrfs_convert_cflags += -DBTRFSCONVERT_REISERFS=$(BTRFSCONVERT_REISERFS)
 btrfs_fragments_libs = -lgd -lpng -ljpeg -lfreetype
-cmds_restore_cflags = -DBTRFSRESTORE_ZSTD=$(BTRFSRESTORE_ZSTD)
+cmds_restore_cflags = -DBTRFSRESTORE_LZO=$(BTRFSRESTORE_LZO) -DBTRFSRESTORE_ZSTD=$(BTRFSRESTORE_ZSTD)
 
 ifeq ($(CRYPTOPROVIDER_BUILTIN),1)
 CRYPTO_OBJECTS = crypto/sha224-256.o crypto/blake2b-ref.o
@@ -788,6 +787,7 @@ clean: $(CLEANDIRS)
 		mkfs/*.o mkfs/*.o.d check/*.o check/*.o.d \
 		cmds/*.o cmds/*.o.d common/*.o common/*.o.d \
 		crypto/*.o crypto/*.o.d \
+		libbtrfs/*.o libbtrfs/*.o.d \
 	      ioctl-test quick-test library-test library-test-static \
               mktables btrfs.static mkfs.btrfs.static fssum \
 	      btrfs.box btrfs.box.static json-formatter-test \

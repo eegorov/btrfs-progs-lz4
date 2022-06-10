@@ -477,6 +477,8 @@ int write_and_map_eb(struct btrfs_fs_info *fs_info, struct extent_buffer *eb)
 			error(
 		"failed to write raid56 stripe for bytenr %llu length %llu: %m",
 				eb->start, length);
+		} else {
+			ret = 0;
 		}
 		goto out;
 	}

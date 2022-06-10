@@ -531,4 +531,21 @@ struct __una_u64 { __le64 x; } __attribute__((__packed__));
 #define noinline
 #endif
 
+/*
+ * Note: simplified versions of READ_ONCE and WRITE_ONCE for source
+ * compatibility only, not usable for lock-less implementation like in kernel.
+ *
+ * Changed:
+ * - __unqual_scalar_typeof: volatile cast to typeof()
+ * - compiletime_assert_rwonce_type: no word size compatibility checks
+ * - no const volatile cast
+ */
+
+#define READ_ONCE(x)		(x)
+
+#define WRITE_ONCE(x, val)						\
+do {									\
+	(x) = (val);							\
+} while (0)
+
 #endif

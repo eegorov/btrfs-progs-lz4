@@ -59,6 +59,10 @@ static int update_seeding_flag(struct btrfs_root *root, int set_flag)
 						device);
 			return 1;
 		}
+		if (btrfs_super_log_root(disk_super)) {
+			error("filesystem with dirty log detected, not setting seed flag");
+			return 1;
+		}
 		super_flags |= BTRFS_SUPER_FLAG_SEEDING;
 	} else {
 		if (!(super_flags & BTRFS_SUPER_FLAG_SEEDING)) {
@@ -790,7 +794,7 @@ static void print_usage(void)
 	printf("  general:\n");
 	printf("\t-f          allow dangerous operations, make sure that you are aware of the dangers\n");
 	printf("\t--help      print this help\n");
-#ifdef EXPERIMENTAL
+#if EXPERIMENTAL
 	printf("\nEXPERIMENTAL FEATURES:\n");
 	printf("  checksum changes:\n");
 	printf("\t--csum CSUM	switch checksum for data and metadata to CSUM\n");
@@ -817,7 +821,7 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 		enum { GETOPT_VAL_CSUM = 256 };
 		static const struct option long_options[] = {
 			{ "help", no_argument, NULL, GETOPT_VAL_HELP},
-#ifdef EXPERIMENTAL
+#if EXPERIMENTAL
 			{ "csum", required_argument, NULL, GETOPT_VAL_CSUM },
 #endif
 			{ NULL, 0, NULL, 0 }
@@ -860,7 +864,7 @@ int BOX_MAIN(btrfstune)(int argc, char *argv[])
 			ctree_flags |= OPEN_CTREE_IGNORE_FSID_MISMATCH;
 			change_metadata_uuid = 1;
 			break;
-#ifdef EXPERIMENTAL
+#if EXPERIMENTAL
 		case GETOPT_VAL_CSUM:
 			ctree_flags |= OPEN_CTREE_SKIP_CSUM_CHECK;
 			csum_type = parse_csum_type(optarg);

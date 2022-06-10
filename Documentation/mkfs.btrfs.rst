@@ -20,7 +20,7 @@ mount option. See section *MULTIPLE DEVICES* for more details.
 The default block group profiles for data and metadata depend on number of
 devices and possibly other factors. It's recommended to use specific profiles
 but the defaults should be OK and allowing future conversions to other profiles.
-Please see options *-d* and *-m* for further detals and ``btrfs-balance(8)`` for
+Please see options *-d* and *-m* for further details and ``btrfs-balance(8)`` for
 the profile conversion post mkfs.
 
 OPTIONS
@@ -92,6 +92,10 @@ OPTIONS
         .. note::
                 Versions up to 4.2.x forced the mixed mode for devices smaller than 1GiB.
                 This has been removed in 4.3+ as it caused some usability issues.
+
+                Mixed profile cannot be used together with other profiles. It can only
+                be set at creation time. Conversion to or from mixed profile is not
+                implemented.
 
 -l|--leafsize <size>
         Alias for *--nodesize*. Deprecated.

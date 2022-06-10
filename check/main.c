@@ -627,6 +627,8 @@ static void print_inode_error(struct btrfs_root *root, struct inode_record *rec)
 	if (errors & I_ERR_INVALID_NLINK)
 		fprintf(stderr, ", directory has invalid nlink %d",
 			rec->nlink);
+	if (errors & I_ERR_INVALID_XATTR)
+		fprintf(stderr, ", invalid xattr");
 	fprintf(stderr, "\n");
 
 	/* Print the holes if needed */
@@ -1473,6 +1475,50 @@ next:
 	return 0;
 }
 
+static int process_xattr_item(struct extent_buffer *eb,
+			      int slot, struct btrfs_key *key,
+			      struct shared_node *active_node)
+{
+	u32 total;
+	u32 cur = 0;
+	struct btrfs_dir_item *di;
+	struct inode_record *rec;
+
+	rec = active_node->current;
+
+	di = btrfs_item_ptr(eb, slot, struct btrfs_dir_item);
+	total = btrfs_item_size(eb, slot);
+	while (cur < total) {
+		u32 name_len = btrfs_dir_name_len(eb, di);
+		u32 data_len = btrfs_dir_data_len(eb, di);
+		u32 len;
+
+		if (name_len > BTRFS_NAME_LEN) {
+			char *name = malloc(name_len);
+
+			if (!name)
+				return -ENOMEM;
+
+			read_extent_buffer(eb, name,
+					   (unsigned long)(di + 1), name_len);
+
+			fprintf(stderr,
+				"inode %llu has overlong xattr name %.*s\n",
+				key->objectid, name_len, name);
+
+			free(name);
+
+			rec->errors |= I_ERR_INVALID_XATTR;
+		}
+
+		len = sizeof(*di) + name_len + data_len;
+		di = (struct btrfs_dir_item *)((char *)di + len);
+		cur += len;
+	}
+
+	return 0;
+}
+
 static int process_inode_ref(struct extent_buffer *eb,
 			     int slot, struct btrfs_key *key,
 			     struct shared_node *active_node)
@@ -1739,6 +1785,9 @@ static int process_one_leaf(struct btrfs_root *root, struct extent_buffer *eb,
 		case BTRFS_EXTENT_DATA_KEY:
 			ret = process_file_extent(root, eb, i, &key,
 						  active_node);
+			break;
+		case BTRFS_XATTR_ITEM_KEY:
+			ret = process_xattr_item(eb, i, &key, active_node);
 			break;
 		default:
 			break;
@@ -8550,13 +8599,17 @@ static int check_device_used(struct device_record *dev_rec,
  */
 static bool is_super_size_valid(void)
 {
-	struct btrfs_device *dev;
-	struct list_head *dev_list = &gfs_info->fs_devices->devices;
+	struct btrfs_fs_devices *fs_devices = gfs_info->fs_devices;
+	const u64 super_bytes = btrfs_super_total_bytes(gfs_info->super_copy);
 	u64 total_bytes = 0;
-	u64 super_bytes = btrfs_super_total_bytes(gfs_info->super_copy);
 
-	list_for_each_entry(dev, dev_list, dev_list)
-		total_bytes += dev->total_bytes;
+	while (fs_devices) {
+		struct btrfs_device *dev;
+
+		list_for_each_entry(dev, &fs_devices->devices, dev_list)
+			total_bytes += dev->total_bytes;
+		fs_devices = fs_devices->seed;
+	}
 
 	/* Important check, which can cause unmountable fs */
 	if (super_bytes < total_bytes) {
@@ -8579,7 +8632,9 @@ static bool is_super_size_valid(void)
 	if (!IS_ALIGNED(super_bytes, gfs_info->sectorsize) ||
 	    !IS_ALIGNED(total_bytes, gfs_info->sectorsize) ||
 	    super_bytes != total_bytes) {
-		warning("minor unaligned/mismatch device size detected");
+		warning("minor unaligned/mismatch device size detected:"
+			"\tsuper block total bytes=%llu found total bytes=%llu",
+			super_bytes, total_bytes);
 		warning(
 		"recommended to use 'btrfs rescue fix-device-size' to fix it");
 	}
@@ -9604,17 +9659,12 @@ out:
 
 static int zero_log_tree(struct btrfs_root *root)
 {
-	struct btrfs_trans_handle *trans;
 	int ret;
 
-	trans = btrfs_start_transaction(root, 1);
-	if (IS_ERR(trans)) {
-		ret = PTR_ERR(trans);
-		return ret;
-	}
 	btrfs_set_super_log_root(gfs_info->super_copy, 0);
 	btrfs_set_super_log_root_level(gfs_info->super_copy, 0);
-	ret = btrfs_commit_transaction(trans, root);
+	/* Don't use transaction for overwriting only the super block */
+	ret = write_all_supers(gfs_info);
 	return ret;
 }
 
