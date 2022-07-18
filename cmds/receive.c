@@ -41,9 +41,14 @@
 #include <linux/fs.h>
 #include <uuid/uuid.h>
 
-#include <lzo/lzo1x.h>
 #include <zlib.h>
+#if COMPRESSION_LZO
+#include <lzo/lzoconf.h>
+#include <lzo/lzo1x.h>
+#endif
+#if COMPRESSION_ZSTD
 #include <zstd.h>
+#endif
 
 #include "kernel-shared/ctree.h"
 #include "ioctl.h"
@@ -70,7 +75,6 @@ struct btrfs_receive
 	char *dest_dir_path; /* relative to root_path */
 	char full_subvol_path[PATH_MAX];
 	char *full_root_path;
-	int dest_dir_chroot;
 
 	struct subvol_info cur_subvol;
 	/*
@@ -79,12 +83,16 @@ struct btrfs_receive
 	 */
 	char cur_subvol_path[PATH_MAX];
 
-	int honor_end_cmd;
+	bool dest_dir_chroot;
+
+	bool honor_end_cmd;
 
 	bool force_decompress;
 
+#if COMPRESSION_ZSTD
 	/* Reuse stream objects for encoded_write decompression fallback */
 	ZSTD_DStream *zstd_dstream;
+#endif
 	z_stream *zlib_stream;
 };
 
@@ -1042,6 +1050,7 @@ static int decompress_zlib(struct btrfs_receive *rctx, const char *encoded_data,
 	return 0;
 }
 
+#if COMPRESSION_ZSTD
 static int decompress_zstd(struct btrfs_receive *rctx, const char *encoded_buf,
 			   u64 encoded_len, char *unencoded_buf,
 			   u64 unencoded_len)
@@ -1080,7 +1089,9 @@ static int decompress_zstd(struct btrfs_receive *rctx, const char *encoded_buf,
 	}
 	return 0;
 }
+#endif
 
+#if COMPRESSION_LZO
 static int decompress_lzo(const char *encoded_data, u64 encoded_len,
 			  char *unencoded_data, u64 unencoded_len,
 			  unsigned int sector_size)
@@ -1142,6 +1153,7 @@ static int decompress_lzo(const char *encoded_data, u64 encoded_len,
 	}
 	return 0;
 }
+#endif
 
 static int decompress_and_write(struct btrfs_receive *rctx,
 				const char *encoded_data, u64 offset,
@@ -1153,7 +1165,7 @@ static int decompress_and_write(struct btrfs_receive *rctx,
 	size_t pos;
 	ssize_t w;
 	char *unencoded_data;
-	int sector_shift;
+	int sector_shift = 0;
 
 	unencoded_data = calloc(unencoded_len, 1);
 	if (!unencoded_data) {
@@ -1168,17 +1180,24 @@ static int decompress_and_write(struct btrfs_receive *rctx,
 		if (ret)
 			goto out;
 		break;
+#if COMPRESSION_ZSTD
 	case BTRFS_ENCODED_IO_COMPRESSION_ZSTD:
 		ret = decompress_zstd(rctx, encoded_data, encoded_len,
 				      unencoded_data, unencoded_len);
 		if (ret)
 			goto out;
 		break;
+#else
+		error("ZSTD compression for stream not compiled in");
+		ret = -EOPNOTSUPP;
+		goto out;
+#endif
 	case BTRFS_ENCODED_IO_COMPRESSION_LZO_4K:
 	case BTRFS_ENCODED_IO_COMPRESSION_LZO_8K:
 	case BTRFS_ENCODED_IO_COMPRESSION_LZO_16K:
 	case BTRFS_ENCODED_IO_COMPRESSION_LZO_32K:
 	case BTRFS_ENCODED_IO_COMPRESSION_LZO_64K:
+#if COMPRESSION_LZO
 		sector_shift =
 			compression - BTRFS_ENCODED_IO_COMPRESSION_LZO_4K + 12;
 		ret = decompress_lzo(encoded_data, encoded_len, unencoded_data,
@@ -1186,6 +1205,11 @@ static int decompress_and_write(struct btrfs_receive *rctx,
 		if (ret)
 			goto out;
 		break;
+#else
+		error("LZO compression for stream not compiled in");
+		ret = -EOPNOTSUPP;
+		goto out;
+#endif
 	default:
 		error("unknown compression: %d", compression);
 		ret = -EOPNOTSUPP;
@@ -1285,7 +1309,7 @@ static int process_fallocate(const char *path, int mode, u64 offset, u64 len,
 	return 0;
 }
 
-static int process_setflags(const char *path, int flags, void *user)
+static int process_fileattr(const char *path, u64 attr, void *user)
 {
 	int ret;
 	struct btrfs_receive *rctx = user;
@@ -1293,16 +1317,17 @@ static int process_setflags(const char *path, int flags, void *user)
 
 	ret = path_cat_out(full_path, rctx->full_subvol_path, path);
 	if (ret < 0) {
-		error("setflags: path invalid: %s", path);
+		error("fileattr: path invalid: %s", path);
 		return ret;
 	}
 	ret = open_inode_for_write(rctx, full_path);
 	if (ret < 0)
 		return ret;
-	ret = ioctl(rctx->write_fd, FS_IOC_SETFLAGS, &flags);
+	ret = -EOPNOTSUPP;
+	/* ret = ioctl(rctx->write_fd, FS_IOC_SETFLAGS, &flags); */
 	if (ret < 0) {
 		ret = -errno;
-		error("setflags: setflags ioctl on %s failed: %m", path);
+		error("fileattr: set file attributes on %s failed: %m", path);
 		return ret;
 	}
 	return 0;
@@ -1332,7 +1357,7 @@ static struct btrfs_send_ops send_ops = {
 	.update_extent = process_update_extent,
 	.encoded_write = process_encoded_write,
 	.fallocate = process_fallocate,
-	.setflags = process_setflags,
+	.fileattr = process_fileattr,
 };
 
 static int do_receive(struct btrfs_receive *rctx, const char *tomnt,
@@ -1485,8 +1510,10 @@ out:
 		close(rctx->dest_dir_fd);
 		rctx->dest_dir_fd = -1;
 	}
+#if COMPRESSION_ZSTD
 	if (rctx->zstd_dstream)
 		ZSTD_freeDStream(rctx->zstd_dstream);
+#endif
 	if (rctx->zlib_stream) {
 		inflateEnd(rctx->zlib_stream);
 		free(rctx->zlib_stream);
@@ -1530,6 +1557,15 @@ static const char * const cmd_receive_usage[] = {
 	HELPINFO_INSERT_GLOBALS,
 	HELPINFO_INSERT_VERBOSE,
 	HELPINFO_INSERT_QUIET,
+	"",
+	"Compression support: zlib"
+#if COMPRESSION_LZO
+		", lzo"
+#endif
+#if COMPRESSION_ZSTD
+		", zstd"
+#endif
+	,
 	NULL
 };
 
@@ -1548,7 +1584,7 @@ static int cmd_receive(const struct cmd_struct *cmd, int argc, char **argv)
 	rctx.mnt_fd = -1;
 	rctx.write_fd = -1;
 	rctx.dest_dir_fd = -1;
-	rctx.dest_dir_chroot = 0;
+	rctx.dest_dir_chroot = false;
 	realmnt[0] = 0;
 	fromfile[0] = 0;
 
@@ -1568,7 +1604,7 @@ static int cmd_receive(const struct cmd_struct *cmd, int argc, char **argv)
 	while (1) {
 		int c;
 		enum {
-			GETOPT_VAL_DUMP = 257,
+			GETOPT_VAL_DUMP = GETOPT_VAL_FIRST,
 			GETOPT_VAL_FORCE_DECOMPRESS,
 		};
 		static const struct option long_opts[] = {
@@ -1600,10 +1636,10 @@ static int cmd_receive(const struct cmd_struct *cmd, int argc, char **argv)
 			}
 			break;
 		case 'e':
-			rctx.honor_end_cmd = 1;
+			rctx.honor_end_cmd = true;
 			break;
 		case 'C':
-			rctx.dest_dir_chroot = 1;
+			rctx.dest_dir_chroot = true;
 			break;
 		case 'E':
 			max_errors = arg_strtou64(optarg);
